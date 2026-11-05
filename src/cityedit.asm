@@ -1,89 +1,73 @@
-; ==============================================================
-; CITYEDIT - editor for the WORLDCITIES "CITIES" data file
-;
-; Record format (40 bytes):
-;   city    cols  0..12   (13 chars, space padded)
-;   ","     col 13
-;   country cols 14..23   (10 chars, space padded)
-;   ","     col 24
-;   lat     cols 25..30   ( 6 chars, e.g. -55.7 or +12.34)
-;   ","     col 31
-;   lon     cols 32..38   ( 7 chars, e.g. +123.45)
-;   CR $0D  col 39
-;
-; Assemble: acme --cpu 6510 src/cityedit.asm
-; ==============================================================
+// ==============================================================
+// CITYEDIT - editor for the WORLDCITIES "CITIES" data file
+//
+// Record format (49 bytes):
+//   city    cols  0..15   (16 chars, space padded)
+//   ","     col 16
+//   country cols 17..32   (16 chars, space padded)
+//   ","     col 33
+//   lat     cols 34..39   ( 6 chars, e.g. -55.68 or +12.34)
+//   ","     col 40
+//   lon     cols 41..47   ( 7 chars, e.g. +123.45)
+//   CR $0D  col 48
+// The file ends with a 0 byte. It is a PRG that loads to $6000.
+//
+// Assemble with build.bat (or: java -jar KickAss.jar src/cityedit.asm -odir ../build)
+// ==============================================================
 
-!to "cityedit.prg", cbm
-!cpu 6510
+.encoding "petscii_upper"
 
-; ---------------- KERNAL ----------------
-CHROUT  = $FFD2
-GETIN   = $FFE4
-PLOT    = $FFF0
-LOAD    = $FFD5
-SAVE    = $FFD8
-SETNAM  = $FFBD
-SETLFS  = $FE00
-CLOSE   = $FFC3
-CLRCHN  = $FFCC
+// ---------------- KERNAL ----------------
+.label CHROUT = $FFD2
+.label GETIN = $FFE4
+.label PLOT = $FFF0
+.label LOAD = $FFD5
+.label SAVE = $FFD8
+.label SETNAM = $FFBD
+.label SETLFS = $FFBA
+.label CLOSE = $FFC3
+.label CLRCHN = $FFCC
 
-; ---------------- memory ----------------
-CITYBUF = $6000
-LINBUF  = $7000
-RECLEN  = 40
-RECMAX  = 160
-NUMROWS = 20             ; list rows on screen (rows 2..21)
+// ---------------- memory ----------------
+.label CITYBUF = $6000
+.label LINBUF = $C000          // field being edited
+.const RECLEN = 49
+.const RECMAX = 250            // same limit as the game
+.const NUMROWS = 20            // list rows on screen (rows 2..21)
 
-; ---------------- zero page ----------------
-reclo   = $FB            ; record pointer
-rechi   = $FC
-srco    = $FD           ; copy source
-srch    = $FE
-dsto    = $FB           ; copy dest (aliases reclo, used at other times)
-dsth    = $FC
-ptr     = $02
-endlo   = $BB            ; KERNAL SAVE end address low
+// ---------------- zero page ----------------
+.label reclo = $FB             // record pointer
+.label rechi = $FC
+.label srco = $FD              // copy source / SAVE start pointer
+.label srch = $FE
+.label ptr = $02
 
-; ---------------- variables ----------------
-seed    = $33C
-numrec  = $33E
-cursor  = $33F
-top     = $340
-editcol = $342
-editlen = $343
-editfield = $344         ; field offset (0, 14, 25, 32)
-fldcur  = $345           ; which field is being edited (0..3)
-tmpa    = $346
-count   = $347
-ctrow   = $348
-ma      = $349
-mb      = $34A
-res     = $34B
-resh    = $34C
-endh    = $34D
+// ---------------- variables ----------------
+.label numrec = $33E
+.label cursor = $33F
+.label top = $340
+.label editcol = $342
+.label editlen = $343
+.label editfield = $344        // field offset (0, 17, 34, 41)
+.label fldcur = $345           // which field is being edited (0..3)
+.label tmpa = $346
+.label count = $347
+.label ctrow = $348
+.label endlo = $34D            // SAVE end address
+.label endh = $34E
+.label gxcol = $34F
+.label pdh = $350              // print_dec8 hundreds digit
 
-; field table: offset,len
-FLDTBL:
-        !byte 0,13, 14,10, 25,6, 32,7
-
-; ==============================================================
-*=$0801
-        !byte $0B,$08,$0A,$00,$9E,$32,$30,$36,$32,$00,$00,$00
-*=$080D
+BasicUpstart2(main)
 
 main:
         lda #0
         sta $D020
         sta $D021
+        lda #1
+        sta $0286               // white text
         lda #$93
         jsr CHROUT
-
-        lda $DC04
-        sta seed
-        lda $DC05
-        eor seed
-        sta seed
 
         lda #<msg_title
         sta ptr
@@ -110,17 +94,17 @@ mainloop:
         jsr get_cmd
         jmp mainloop
 
-; --------------------------------------------------------------
-; load CITIES (raw). Missing file -> empty database.
-; --------------------------------------------------------------
+// --------------------------------------------------------------
+// load CITIES. Missing file -> empty database.
+// --------------------------------------------------------------
 load_cities:
-        lda #6
+        lda #fn_end-fn_cities
         ldx #<fn_cities
         ldy #>fn_cities
         jsr SETNAM
         lda #2
         ldx #8
-        ldy #2
+        ldy #0                  // SA=0: load to the X/Y address
         jsr SETLFS
         lda #0
         ldx #<CITYBUF
@@ -133,7 +117,7 @@ lc_fresh:
         jsr close_ch
         lda #0
         sta numrec
-        jsr clear_buf
+        sta CITYBUF
         rts
 lc_count:
         lda #<CITYBUF
@@ -160,120 +144,108 @@ lcc_done:
         stx numrec
         rts
 
-; clear whole 8 KB buffer
-clear_buf:
-        ldx #0
-cb_loop:
-        lda #0
-        sta CITYBUF,x
-        sta CITYBUF+$0100,x
-        sta CITYBUF+$0200,x
-        sta CITYBUF+$0300,x
-        sta CITYBUF+$0400,x
-        sta CITYBUF+$0500,x
-        sta CITYBUF+$0600,x
-        sta CITYBUF+$0700,x
-        inx
-        bne cb_loop
-        rts
-
-; --------------------------------------------------------------
-; save CITIES (raw, SA=2)
-; --------------------------------------------------------------
+// --------------------------------------------------------------
+// S: save CITIES, replacing the file on disk
+// --------------------------------------------------------------
 k_save:
         lda numrec
-        beq ks_empty
-        sta ma
-        lda #RECLEN
-        sta mb
-        jsr mul8                ; res/resh = numrec * 40
+        bne ks_go
+        jmp ks_empty
+ks_go:
+        jsr get_recptr          // reclo = end of the last record
+        lda #0
+        tay
+        sta (reclo),y           // end marker
         clc
-        lda res
-        adc #<CITYBUF
+        lda reclo
+        adc #1                  // SAVE end address is one past the last byte
         sta endlo
-        lda resh
-        adc #>CITYBUF
+        lda rechi
+        adc #0
         sta endh
-        lda #6
-        ldx #<fn_cities
-        ldy #>fn_cities
+        lda #fn_end-fn_save
+        ldx #<fn_save
+        ldy #>fn_save
         jsr SETNAM
         lda #2
         ldx #8
-        ldy #2
+        ldy #1
         jsr SETLFS
         lda #<CITYBUF
-        ldx #>CITYBUF
+        sta srco
+        lda #>CITYBUF
+        sta srch
+        lda #srco               // A = zero-page pointer to the start address
+        ldx endlo
         ldy endh
         jsr SAVE
+        php
         jsr close_ch
+        jsr status_line
+        plp
         bcc ks_ok
         lda #<msg_ferr
         sta ptr
         lda #>msg_ferr
         sta ptr+1
         jsr print_str
-        jmp ks_done
+        jmp wait_space
 ks_ok:
         lda #<msg_saved
         sta ptr
         lda #>msg_saved
         sta ptr+1
         jsr print_str
-ks_done:
-        jsr wait_space
-        rts
+        jmp wait_space
 ks_empty:
+        jsr status_line
         lda #<msg_none
         sta ptr
         lda #>msg_none
         sta ptr+1
         jsr print_str
-        jsr wait_space
-        rts
+        jmp wait_space
 
-; --------------------------------------------------------------
-; command keys
-; --------------------------------------------------------------
+// --------------------------------------------------------------
+// command keys
+// --------------------------------------------------------------
 get_cmd:
         jsr GETIN
         beq get_cmd
-        cmp #$11                ; down
+        cmp #$11                // down
         bne gc1
         ldy cursor
+        iny
         cpy numrec
         bcs gc_rts
-        iny
         sty cursor
-        jsr scroll_check
-        rts
+        jmp scroll_check
 gc1:
-        cmp #$91                ; up
+        cmp #$91                // up
         bne gc2
         ldy cursor
         beq gc_rts
         dey
         sty cursor
-        jsr scroll_check
-        rts
+        jmp scroll_check
 gc2:
-        cmp #$41                ; A add
+        cmp #$41                // A add
         bne gc3
         jmp k_add
 gc3:
-        cmp #$45                ; E edit
+        cmp #$45                // E edit
         bne gc4
         jmp k_edit
 gc4:
-        cmp #$44                ; D delete
+        cmp #$44                // D delete
         bne gc5
         jmp k_del
 gc5:
-        cmp #$53                ; S save
+        cmp #$53                // S save
         bne gc6
         jmp k_save
 gc6:
-        cmp #$52                ; R reload
+        cmp #$52                // R reload
         bne gc7
         jsr load_cities
         lda #0
@@ -281,26 +253,28 @@ gc6:
         sta top
         rts
 gc7:
-        cmp #$51                ; Q quit
+        cmp #$51                // Q quit
         bne gc_rts
+        pla                     // drop get_cmd's return address
+        pla
         jmp main
 gc_rts:
         rts
 
-; --------------------------------------------------------------
-; A: append a blank record, edit it
-; --------------------------------------------------------------
+// --------------------------------------------------------------
+// A: append a blank record, edit it
+// --------------------------------------------------------------
 k_add:
         lda numrec
         cmp #RECMAX
         bcc ka_ok
+        jsr status_line
         lda #<msg_full
         sta ptr
         lda #>msg_full
         sta ptr+1
         jsr print_str
-        jsr wait_space
-        rts
+        jmp wait_space
 ka_ok:
         lda numrec
         jsr get_recptr
@@ -313,64 +287,56 @@ ka_ok:
         jsr scroll_check
         jmp k_edit
 
-; fill record at reclo/rechi with blanks + commas + CR
+// fill record at reclo/rechi with blanks + commas + CR
 blank_record:
         ldy #0
-br_loop:
         lda #$20
+br_loop:
         sta (reclo),y
         iny
-        cpy #39
+        cpy #RECLEN-1
         bcc br_loop
-        ldy #13
         lda #$2C
+        ldy #16
         sta (reclo),y
-        ldy #24
+        ldy #33
         sta (reclo),y
-        ldy #31
+        ldy #40
         sta (reclo),y
-        ldy #39
+        ldy #RECLEN-1
         lda #$0D
         sta (reclo),y
         rts
 
-; --------------------------------------------------------------
-; D: delete record at cursor, move rest down, zero last
-; --------------------------------------------------------------
+// --------------------------------------------------------------
+// D: delete record at cursor, move the rest down
+// --------------------------------------------------------------
 k_del:
         lda numrec
-        beq kd_empty
-        lda cursor
-        cmp numrec
-        bcc kd_ok
-kd_empty:
+        bne kd_ok
+        jsr status_line
         lda #<msg_none
         sta ptr
         lda #>msg_none
         sta ptr+1
         jsr print_str
-        jsr wait_space
-        rts
+        jmp wait_space
 kd_ok:
         lda cursor
+        sta tmpa                // tmpa = record being overwritten
 kd_loop:
-        sta tmpa                ; tmpa = current record index
+        lda tmpa
+        clc
+        adc #1
         cmp numrec
         bcs kd_last
-        clc
-        adc #1                  ; next record
-        sta tmpa
-        lda tmpa
-        jsr get_recptr
+        jsr get_recptr          // source = next record
         lda reclo
         sta srco
         lda rechi
         sta srch
         lda tmpa
-        sec
-        sbc #1
-        sta tmpa
-        jsr get_recptr          ; reclo now = dest
+        jsr get_recptr          // dest
         ldy #0
 kd_copy:
         lda (srco),y
@@ -378,128 +344,103 @@ kd_copy:
         iny
         cpy #RECLEN
         bcc kd_copy
-        lda tmpa
+        inc tmpa
         jmp kd_loop
 kd_last:
         dec numrec
         lda numrec
         jsr get_recptr
-        ldy #0
-kd_zero:
         lda #0
-        sta (reclo),y
-        iny
-        cpy #RECLEN
-        bcc kd_zero
+        tay
+        sta (reclo),y           // new end marker
         lda cursor
         cmp numrec
         bcc kd_cur
         lda numrec
+        beq kd_cur
+        sec
+        sbc #1
         sta cursor
 kd_cur:
-        jsr scroll_check
-        rts
+        jmp scroll_check
 
-; --------------------------------------------------------------
-; E: edit record at cursor, field by field
-; --------------------------------------------------------------
+// --------------------------------------------------------------
+// E: edit record at cursor, field by field
+// --------------------------------------------------------------
 k_edit:
         lda numrec
-        beq ke_empty
-        lda cursor
-        cmp numrec
-        bcc ke_ok
-ke_empty:
+        bne ke_ok
+        jsr status_line
         lda #<msg_none
         sta ptr
         lda #>msg_none
         sta ptr+1
         jsr print_str
-        jsr wait_space
-        rts
+        jmp wait_space
 ke_ok:
-        lda cursor
-        jsr get_recptr
         lda #0
         sta fldcur
 ke_loop:
-        jsr draw_edit
+        lda cursor
+        jsr get_recptr
         jsr edit_field
-        lda fldcur
-        cmp #3
-        beq ke_done
         inc fldcur
-        jmp ke_loop
-ke_done:
+        lda fldcur
+        cmp #4
+        bne ke_loop
+        ldx #0
+        ldy #10
+        jsr gotoxy
         lda #<msg_eddone
         sta ptr
         lda #>msg_eddone
         sta ptr+1
         jsr print_str
-        jsr wait_space
-        rts
+        jmp wait_space
 
-; --------------------------------------------------------------
-; edit_field: edit field fldcur of record at reclo/rechi
-; --------------------------------------------------------------
+// --------------------------------------------------------------
+// edit_field: edit field fldcur of record at reclo/rechi
+// --------------------------------------------------------------
 edit_field:
-        ldx fldcur
+        lda fldcur
+        asl
+        tax
         lda FLDTBL,x
         sta editfield
-        inx
-        lda FLDTBL,x
+        lda FLDTBL+1,x
         sta editlen
-        lda #0
-        sta editcol
-        ; copy field into LINBUF
-        ldy #0
+        // copy field into LINBUF
+        ldx #0
 ef_copy:
-        ldx editfield
         txa
         clc
-        adc #0
-        tax
-        lda (reclo),y            ; y counts 0..len-1, x unused here
-        jmp ef_c2
-ef_c2:
-        ldx editfield
-        lda editcol              ; save
-        pha
-        lda #0
-        sta editcol
-ef_c3:
-        lda editfield
-        clc
-        adc editcol
+        adc editfield
         tay
         lda (reclo),y
-        ldx editcol
         sta LINBUF,x
-        inc editcol
-        lda editcol
-        cmp editlen
-        bcc ef_c3
-        pla
+        inx
+        cpx editlen
+        bcc ef_copy
+        lda #0
         sta editcol
-        jmp ef_key
-
+        jsr draw_edit
 ef_key:
         jsr GETIN
         beq ef_key
-        cmp #$0D                ; RETURN = accept
+        cmp #$0D                // RETURN = accept
         beq ef_accept
-        cmp #$14                ; DELETE
+        cmp #$14                // DELETE
         beq ef_del
         cmp #$20
         bcc ef_key
-        cmp #$60                ; only upper case graphics range accepted
+        cmp #$60                // upper case, digits and signs only
         bcs ef_key
         ldx editcol
         cpx editlen
         bcs ef_key
         sta LINBUF,x
-        jsr draw_edit
         inc editcol
+        jsr draw_edit
         jmp ef_key
 ef_del:
         ldx editcol
@@ -511,24 +452,10 @@ ef_del:
         jsr draw_edit
         jmp ef_key
 ef_accept:
-        ; write LINBUF back into the record field
+        // write LINBUF back into the record field
         ldx #0
 ef_write:
-        lda editfield
-        clc
-        adc #0
-        tay
-        tya
-        clc
-        adc #0
-        tay
-        lda editfield
-        clc
-        adc #0
-        sta tmpa
-        ldy #0
-ef_w1:
-        tya
+        txa
         clc
         adc editfield
         tay
@@ -536,19 +463,19 @@ ef_w1:
         sta (reclo),y
         inx
         cpx editlen
-        bcc ef_w1
+        bcc ef_write
         rts
 
-; --------------------------------------------------------------
-; get_recptr: A = record index -> reclo/rechi
-; --------------------------------------------------------------
+// --------------------------------------------------------------
+// get_recptr: A = record index -> reclo/rechi
+// --------------------------------------------------------------
 get_recptr:
-        sta tmpa
+        tax
         lda #<CITYBUF
         sta reclo
         lda #>CITYBUF
         sta rechi
-        ldx tmpa
+        cpx #0
         beq grp_done
 grp_loop:
         clc
@@ -563,9 +490,9 @@ grp_loop:
 grp_done:
         rts
 
-; --------------------------------------------------------------
-; drawing
-; --------------------------------------------------------------
+// --------------------------------------------------------------
+// drawing
+// --------------------------------------------------------------
 clear_screen:
         lda #$93
         jsr CHROUT
@@ -584,6 +511,7 @@ draw_header:
         jsr print_dec8
         rts
 
+// one row per record: number (col 1), city (col 5), country (col 22)
 draw_list:
         lda #0
         sta ctrow
@@ -592,51 +520,53 @@ dl_loop:
         clc
         adc ctrow
         cmp numrec
-        bcc dl_show
-        jmp dl_next
-dl_show:
+        bcs dl_next
         sta tmpa
-        ldx #0
         lda ctrow
         clc
         adc #2
         tay
+        ldx #1
         jsr gotoxy
         lda tmpa
-        cmp #100
-        bcs dl_n3
-        lda #$20
-        jsr CHROUT
-        cmp #10
-        bcs dl_n2
-        lda #$20
-        jsr CHROUT
-dl_n2:
-        lda tmpa
-dl_n3:
-        lda tmpa
+        clc
+        adc #1                  // show 1-based numbers
         jsr print_dec8
-        lda #$20
-        jsr CHROUT
+        lda ctrow
+        clc
+        adc #2
+        tay
+        ldx #5
+        jsr gotoxy
         lda tmpa
         jsr get_recptr
-        jsr print_city
-        lda #$20
-        jsr CHROUT
-        lda #$20
-        jsr CHROUT
-        jsr print_country
-        lda #$20
-        jsr CHROUT
-        jsr print_field_lat
-        lda #$20
-        jsr CHROUT
-        jsr print_field_lon
+        ldy #0
+        jsr print16
+        lda ctrow
+        clc
+        adc #2
+        tay
+        ldx #22
+        jsr gotoxy
+        ldy #17
+        jsr print16
 dl_next:
         inc ctrow
         lda ctrow
         cmp #NUMROWS
         bne dl_loop
+        rts
+
+// print 16 chars of the record at reclo, from offset Y
+print16:
+        lda #16
+        sta count
+p16_loop:
+        lda (reclo),y
+        jsr CHROUT
+        iny
+        dec count
+        bne p16_loop
         rts
 
 draw_status:
@@ -650,21 +580,35 @@ draw_status:
         jsr print_str
         rts
 
+// clear row 22 and put the cursor there for a message
+status_line:
+        ldx #0
+        ldy #22
+        jsr gotoxy
+        ldx #39
+        lda #$20
+sl_loop:
+        jsr CHROUT
+        dex
+        bne sl_loop
+        ldx #0
+        ldy #22
+        jmp gotoxy
+
 draw_cursor:
+        lda numrec
+        beq dc_done
         lda cursor
         sec
         sbc top
-        cmp #NUMROWS
-        bcc dc_ok
-        lda #0
-dc_ok:
         clc
         adc #2
         tay
         ldx #0
         jsr gotoxy
-        lda #$3E                ; ">"
+        lda #$3E                // ">"
         jsr CHROUT
+dc_done:
         rts
 
 scroll_check:
@@ -673,8 +617,10 @@ scroll_check:
         bcc sc_up
         sec
         sbc #NUMROWS-1
+        bcc sc_ok               // near the top: top can stay
         cmp top
         bcc sc_ok
+        beq sc_ok
         sta top
         rts
 sc_up:
@@ -683,7 +629,7 @@ sc_up:
 sc_ok:
         rts
 
-; edit screen: prompt lines + current field content from LINBUF
+// edit screen: prompt lines + current field content from LINBUF
 draw_edit:
         lda #$93
         jsr CHROUT
@@ -695,46 +641,26 @@ draw_edit:
         lda #>msg_ed1
         sta ptr+1
         jsr print_str
-        ; prompt for the current field
+        ldx #0
+        ldy #3
+        jsr gotoxy
         lda fldcur
-        cmp #0
-        bne de1
-        lda #<msg_ed_city
+        asl
+        tax
+        lda prompt_tbl,x
         sta ptr
-        lda #>msg_ed_city
+        lda prompt_tbl+1,x
         sta ptr+1
         jsr print_str
-        jmp de_show
-de1:
-        cmp #1
-        bne de2
-        lda #<msg_ed_country
-        sta ptr
-        lda #>msg_ed_country
-        sta ptr+1
-        jsr print_str
-        jmp de_show
-de2:
-        cmp #2
-        bne de3
-        lda #<msg_ed_lat
-        sta ptr
-        lda #>msg_ed_lat
-        sta ptr+1
-        jsr print_str
-        jmp de_show
-de3:
-        lda #<msg_ed_lon
-        sta ptr
-        lda #>msg_ed_lon
-        sta ptr+1
-        jsr print_str
-de_show:
         ldx #0
 de_sh:
         cpx editcol
         bne de_sh2
-        lda #$5B                ; "[" marks cursor
+        lda #$12                // reverse on: the cursor position
+        jsr CHROUT
+        lda LINBUF,x
+        jsr CHROUT
+        lda #$92                // reverse off
         jsr CHROUT
         jmp de_sh3
 de_sh2:
@@ -754,45 +680,9 @@ de_sh3:
         jsr print_str
         rts
 
-; --------------------------------------------------------------
-; field printers (record at reclo/rechi, trailing spaces kept
-; simple: print fixed width)
-; --------------------------------------------------------------
-print_city:
-        ldy #0
-        lda #13
-        sta count
-        jmp pf_loop
-print_country:
-        ldy #14
-        lda #10
-        sta count
-        jmp pf_loop
-print_field_lat:
-        ldy #25
-        lda #6
-        sta count
-        jmp pf_loop
-print_field_lon:
-        ldy #32
-        lda #7
-        sta count
-pf_loop:
-        lda #0
-        sta tmpa
-pf_l:
-        lda (reclo),y
-        jsr CHROUT
-        iny
-        inc tmpa
-        lda tmpa
-        cmp count
-        bcc pf_l
-        rts
-
-; --------------------------------------------------------------
-; misc
-; --------------------------------------------------------------
+// --------------------------------------------------------------
+// misc
+// --------------------------------------------------------------
 print_str:
         ldy #0
 ps_loop:
@@ -804,29 +694,51 @@ ps_loop:
 ps_done:
         rts
 
-gotoxy:
-        lda #0
+gotoxy:                         // X = column, Y = row; KERNAL PLOT wants X = row, Y = column
+        stx gxcol
+        tya
+        tax
+        ldy gxcol
         clc
         jsr PLOT
         rts
 
+// print A (0..255) as decimal
 print_dec8:
-        ldx #$30
-pd1:
+        ldx #0
+pd_h:
+        cmp #100
+        bcc pd_hd
+        sbc #100
+        inx
+        bne pd_h
+pd_hd:
+        stx pdh
+        ldx #0
+pd_t:
         cmp #10
-        bcc pd2
-        sec
+        bcc pd_td
         sbc #10
         inx
-        jmp pd1
-pd2:
-        cpx #$30
-        beq pd3
-        pha
-        txa
+        bne pd_t
+pd_td:
+        pha                     // ones
+        lda pdh
+        beq pd_nohund
+        clc
+        adc #$30
         jsr CHROUT
+        txa
+        jmp pd_tens
+pd_nohund:
+        txa
+        beq pd_ones
+pd_tens:
+        clc
+        adc #$30
+        jsr CHROUT
+pd_ones:
         pla
-pd3:
         clc
         adc #$30
         jsr CHROUT
@@ -845,64 +757,69 @@ close_ch:
         jsr CLRCHN
         rts
 
-mul8:
-        lda #0
-        sta res
-        sta resh
-        ldx #8
-m_loop:
-        asl ma
-        php
-        asl res
-        rol resh
-        plp
-        bcc m_next
-        lda res
-        clc
-        adc mb
-        sta res
-        lda resh
-        adc #0
-        sta resh
-m_next:
-        dex
-        bne m_loop
-        rts
+// --------------------------------------------------------------
+// tables and strings
+// --------------------------------------------------------------
+// field table: offset,len
+FLDTBL:
+        .byte 0,16, 17,16, 34,6, 41,7
 
-; --------------------------------------------------------------
-; strings
-; --------------------------------------------------------------
+prompt_tbl:
+        .word msg_ed_city, msg_ed_country, msg_ed_lat, msg_ed_lon
+
 msg_title:
-        !text "*** CITYEDIT ***", $0D, $0D
-        !text "EDITOR FOR THE WORLDCITIES CITIES FILE.", $0D
-        !text "EDITS CITIES ON DEVICE 8.", $0D, $0D
-        !text "PRESS SPACE TO START", $0D, 0
+        .text "*** CITYEDIT ***"
+        .byte $0D, $0D
+        .text "EDITOR FOR THE WORLDCITIES CITIES FILE."
+        .byte $0D
+        .text "EDITS CITIES ON DEVICE 8."
+        .byte $0D, $0D
+        .text "PRESS SPACE TO START"
+        .byte $0D, 0
 msg_head:
-        !text "CITYEDIT  RECORDS: ", 0
+        .text "CITYEDIT  RECORDS: "
+        .byte 0
 msg_stat:
-        !text "CRSR=MOVE A=ADD D=DEL E=EDIT S=SAVE R=RELOAD", 0
+        .text "CRSR=MOVE A=ADD D=DEL E=EDIT"
+        .byte $0D
+        .text "S=SAVE R=RELOAD Q=QUIT"
+        .byte 0
 msg_none:
-        !text "NO RECORDS", $0D, 0
+        .text "NO RECORDS - SPACE"
+        .byte 0
 msg_full:
-        !text "FILE FULL", $0D, 0
+        .text "FILE FULL - SPACE"
+        .byte 0
 msg_saved:
-        !text "SAVED", $0D, 0
+        .text "SAVED - SPACE"
+        .byte 0
 msg_ferr:
-        !text "DISK ERROR", $0D, 0
+        .text "DISK ERROR - SPACE"
+        .byte 0
 msg_ed1:
-        !text "EDIT RECORD - RETURN=NEXT FIELD", 0
+        .text "EDIT RECORD - RETURN=NEXT FIELD"
+        .byte 0
 msg_ed_city:
-        !text "CITY   : ", 0
+        .text "CITY   : "
+        .byte 0
 msg_ed_country:
-        !text "COUNTRY: ", 0
+        .text "COUNTRY: "
+        .byte 0
 msg_ed_lat:
-        !text "LAT    : ", 0
+        .text "LAT    : "
+        .byte 0
 msg_ed_lon:
-        !text "LON    : ", 0
+        .text "LON    : "
+        .byte 0
 msg_ed_hint:
-        !text "TYPE. RETURN=NEXT, DEL=BACKSPACE", 0
+        .text "TYPE. RETURN=NEXT, DEL=BACKSPACE"
+        .byte 0
 msg_eddone:
-        !text "DONE - SPACE=BACK TO LIST", $0D, 0
+        .text "DONE - SPACE=BACK TO LIST"
+        .byte 0
 
+fn_save:
+        .text "@0:"
 fn_cities:
-        !text "CITIES"
+        .text "CITIES"
+fn_end:

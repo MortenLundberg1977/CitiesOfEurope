@@ -10,32 +10,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ACME cross-assembler
+      - name: Install Java, VICE (c1541) and Pillow
         run: |
           sudo apt-get update
-          sudo apt-get install -y acme
+          sudo apt-get install -y default-jre-headless vice python3-pil
 
-      - name: Assemble PRGs
+      - name: Get KickAssembler
         run: |
-          cd src
-          acme --cpu 6510 worldcities.asm
-          acme --cpu 6510 cityedit.asm
-          ls -l *.prg
+          curl -sfL -o kickass.zip https://theweb.dk/KickAssembler/KickAssembler.zip
+          unzip -q -j kickass.zip KickAss.jar -d tools
 
-      - name: Generate data files
-        run: |
-          mkdir -p build
-          python3 tools/csv2c64.py data/cities.csv build/CITIES
-          python3 tools/mask2c64.py assets/worldmask.txt build/CHARMAP build/COLMAP
-
-      - name: Build D64 disk image
-        run: |
-          python3 tools/mkd64.py build/worldcities.d64 "WORLDCITIES 2026" \
-            src/worldcities.prg WORLDCITIES prg \
-            src/cityedit.prg CITYEDIT prg \
-            build/CITIES CITIES seq \
-            build/CHARMAP CHARMAP seq \
-            build/COLMAP COLMAP seq
+      - name: Build PRGs and D64
+        run: tools/build.sh
 
       - name: Upload disk image
         uses: actions/upload-artifact@v4
