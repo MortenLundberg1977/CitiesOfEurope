@@ -122,6 +122,9 @@
 .label regdy = $375
 .label candidx = $376
 .label saveok = $377
+.label sfxtime = $378          // frames left of the current note (0 = silent)
+.label sfxpos = $379           // offset of the next note in sfx_tbl
+.label sfxwave = $37A          // waveform of the effect
 .label upsrc = $FB             // unpack pointers (alias dvd/dvs)
 .label updst = $FD
 
@@ -222,6 +225,9 @@ roundloop:
         beq was_correct
 
         // ----- wrong answer -----
+        ldx #sfx_wrong-sfx_tbl
+        lda #$20                // sawtooth
+        jsr play_sfx
         jsr get_recptr_ans
         ldy #F_WRONG+2
         jsr count_up
@@ -238,6 +244,9 @@ roundloop:
 
 was_correct:
         inc score
+        ldx #sfx_right-sfx_tbl
+        lda #$10                // triangle
+        jsr play_sfx
         jsr get_recptr_ans
         ldy #F_RIGHT+2
         jsr count_up
@@ -858,8 +867,82 @@ text_mode:
         sta $D018
         lda #0
         sta $D015
+        sta $D404               // stop a sound that is still playing
+        sta sfxtime
         cli
         rts
+
+// --------------------------------------------------------------
+// sound effects on SID voice 1, played by the raster interrupt.
+// play_sfx: X = offset of the effect in sfx_tbl, A = waveform.
+// An effect is a list of notes: frequency (word), frames; 0 frames ends it.
+// --------------------------------------------------------------
+play_sfx:
+        sei
+        stx sfxpos
+        sta sfxwave
+        lda #0
+        sta $D404               // gate off, so the new sound starts cleanly
+        lda #$0F
+        sta $D418               // volume
+        lda #$00
+        sta $D405               // attack 0, decay 0
+        lda #$F9
+        sta $D406               // sustain 15, release 9
+        lda #1
+        sta sfxtime
+        jsr sfx_tick            // first note
+        lda sfxwave
+        ora #1                  // gate on
+        sta $D404
+        cli
+        rts
+
+// once a frame: next note when the current one is over
+sfx_tick:
+        lda sfxtime
+        beq st_done             // nothing playing
+        dec sfxtime
+        bne st_done
+        ldx sfxpos
+        lda sfx_tbl+2,x
+        beq st_end
+        sta sfxtime
+        lda sfx_tbl,x
+        sta $D400
+        lda sfx_tbl+1,x
+        sta $D401
+        inx
+        inx
+        inx
+        stx sfxpos
+st_done:
+        rts
+st_end:
+        lda sfxwave             // gate off: the note fades out
+        sta $D404
+        rts
+
+// SID frequencies for PAL: Hz * 17.03
+sfx_tbl:
+sfx_right:                      // C5 E5 G5 C6, quick and rising
+        .word $22CF
+        .byte 4
+        .word $2BDC
+        .byte 4
+        .word $3428
+        .byte 4
+        .word $459D
+        .byte 12
+        .word 0
+        .byte 0
+sfx_wrong:                      // A3 then E3, low and falling
+        .word $0EA3
+        .byte 8
+        .word $0AF7
+        .byte 18
+        .word 0
+        .byte 0
 
 // top of the screen: bitmap on, flash the marker, scan the keyboard
 irq_map:
@@ -869,6 +952,7 @@ irq_map:
         sta $D011
         lda #$18                // screen $0400, bitmap $2000
         sta $D018
+        jsr sfx_tick
         inc frames
         lda frames
         and #$08

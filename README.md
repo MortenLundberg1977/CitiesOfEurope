@@ -12,7 +12,8 @@ world: Europe, Middle East, Africa, Asia, Oceania, North & Central America or
 South America. Pick the right city from three choices with keys **1-3**; the
 two wrong choices come from the same region. After each answer the game shows
 the city and its country; press Space for the next one. At the end you get
-your score out of 10, and Space starts a new game.
+your score out of 10, and Space starts a new game. A right answer plays a
+rising chime, a wrong one a low buzz.
 
 The game counts right and wrong answers for every city and saves the counts
 to the CITIES file on the disk after each game ("SAVING SCORES..."). The
