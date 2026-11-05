@@ -1,0 +1,44 @@
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ACME cross-assembler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y acme
+
+      - name: Assemble PRGs
+        run: |
+          cd src
+          acme --cpu 6510 worldcities.asm
+          acme --cpu 6510 cityedit.asm
+          ls -l *.prg
+
+      - name: Generate data files
+        run: |
+          mkdir -p build
+          python3 tools/csv2c64.py data/cities.csv build/CITIES
+          python3 tools/mask2c64.py assets/worldmask.txt build/CHARMAP build/COLMAP
+
+      - name: Build D64 disk image
+        run: |
+          python3 tools/mkd64.py build/worldcities.d64 "WORLDCITIES 2026" \
+            src/worldcities.prg WORLDCITIES prg \
+            src/cityedit.prg CITYEDIT prg \
+            build/CITIES CITIES seq \
+            build/CHARMAP CHARMAP seq \
+            build/COLMAP COLMAP seq
+
+      - name: Upload disk image
+        uses: actions/upload-artifact@v4
+        with:
+          name: worldcities-d64
+          path: build/worldcities.d64
