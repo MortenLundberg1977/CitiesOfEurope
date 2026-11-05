@@ -1,17 +1,22 @@
 # World Cities
 
 A "name the capital" game for the Commodore 64, written in 6502 assembly
-with KickAssembler, plus a companion data-file editor. Two programs, two
-data files, one disk.
+with KickAssembler, plus a companion data-file editor.
 
 ## Gameplay
 
-Press Space on the title screen. Ten capitals are marked one by one on a
-hi-res world map with a flashing ring; pick the right city from three
-choices with keys **1-3**. After each answer the game shows the city and
-its country; press Space for the next one. At the end you get your score out
-of 10. Space starts a new game (the map and cities stay in memory, so it
-starts straight away).
+Press Space on the title screen once the disk has stopped loading (about a
+minute on a real 1541; use warp in VICE to skip the wait). Ten capitals are
+marked one by one with a flashing ring on a hi-res map of their part of the
+world: Europe, Middle East, Africa, Asia, Oceania, North & Central America or
+South America. Pick the right city from three choices with keys **1-3**; the
+two wrong choices come from the same region. After each answer the game shows
+the city and its country; press Space for the next one. At the end you get
+your score out of 10, and Space starts a new game.
+
+The game counts right and wrong answers for every city and saves the counts
+to the CITIES file on the disk after each game ("SAVING SCORES..."). The
+counts are kept when you rebuild the disk.
 
 The city list (`data/cities.csv`) has the capitals of all 193 UN member
 states plus Vatican City, Palestine, Kosovo and Taiwan: 197 in all. The game
@@ -35,13 +40,15 @@ build.bat pull run
 Windows). Give a branch name to switch to that branch first
 (`build.bat pull my-branch run`). If you have local changes that are not
 committed, the pull stops so nothing is overwritten. `run` starts the game in
-VICE; `run editor` starts CITYEDIT instead.
+VICE; `run editor` starts CITYEDIT instead. Close VICE before building: the
+build can't replace a disk that VICE has open.
 
 The script assembles both programs, makes the data files with
 `prepare_data.ps1`, and writes a fresh `build\worldcities.d64` with
-`WORLDCITIES`, `CITYEDIT`, `CITIES` and `WORLDMAP`. Because the disk is made
-fresh each time, changes saved with CITYEDIT are lost on the next build: to
-keep a city, add it to `data/cities.csv`.
+`WORLDCITIES`, `CITYEDIT`, `CITIES`, `MAPS`, `TITLESCR` and `TITLEBMP`. The
+cities come from `data/cities.csv`, with the answer counts copied from the old
+disk (matched by city and country). Other changes saved with CITYEDIT are lost
+on the next build: to keep a city, add it to `data/cities.csv`.
 
 On Linux or macOS use `tools/build.sh` (needs Python 3 with Pillow). The
 GitHub Actions workflow runs it on every push: open the latest **Build** run
@@ -54,33 +61,63 @@ LOAD"WORLDCITIES",8,1
 RUN
 ```
 
+## The region maps
+
+Each region in `data/regions.csv` has a top-left corner (`LON0`, `LAT0`, in
+degrees) and a scale (`DX`, `DY`: hundredths of a degree per pixel). Its map is
+320x160 pixels, so it covers `3.2 × DX` degrees of longitude and `1.6 × DY`
+degrees of latitude. The same numbers are used to draw the map
+(`tools/render_map.ps1`) and to place the marker in the game:
+
+```
+x = (lon − LON0) / DX      the difference wraps at 360°, so a region may
+y = (LAT0 − lat) / DY      cross the 180° line (Oceania does)
+```
+
+so the marker always lands where the city is on the map. `DY` is a little
+larger than `DX × cos(latitude)` would make it, which stretches the maps
+vertically so the regions fill the 2:1 map area.
+
+Each city has a region number in the `REGION` column of `data/cities.csv`.
+The build stops if a city lies outside its region's map, or if a region has
+fewer than 3 cities.
+
+To change a region, edit `data/regions.csv` and redraw the maps:
+
+```bat
+powershell -File tools\render_map.ps1 path\to\ne_50m_land.geojson
+```
+
+The GeoJSON is Natural Earth's public-domain 1:50m land outlines
+(`geojson/ne_50m_land.geojson` in
+https://github.com/nvkelso/natural-earth-vector). It takes a few minutes;
+commit the new `assets/maps/region*.png`.
+
 ## CITYEDIT
 
 Edits the CITIES file on the disk. Keys: cursor up/down to select, **A** add,
 **E** edit, **D** delete, **S** save, **R** reload, **Q** back to the title.
 While editing, type over the field, Delete to go back, Return for the next
-field (city, country, latitude, longitude). Coordinates are degrees with two
-decimals and a sign, e.g. `+55.68` and `-171.77`.
+field (city, country, latitude, longitude, region). Coordinates are degrees
+with two decimals and a sign, e.g. `+55.68` and `-171.77`. CITYEDIT doesn't
+check that a city fits its region's map; the build does.
 
 ## Project files
 
-- `src/worldcities.asm` — the game: loading, map display (bitmap with a raster
-  split to text for the bottom five rows), marker sprite, questions, score
+- `src/worldcities.asm` — the game: loading, region maps (unpacked into a
+  bitmap with a raster split to text for the bottom five rows), marker sprite,
+  questions, score, answer counts
 - `src/cityedit.asm` — the CITIES editor
-- `data/cities.csv` — the capitals: city, country, latitude, longitude
+- `data/cities.csv` — the capitals: city, country, latitude, longitude, region
   (names up to 16 characters)
-- `assets/worldmap.png` — the 320x160 world map (black land, white sea)
+- `data/regions.csv` — the regions: name, corner and scale of each map
+- `assets/maps/region*.png` — the region maps (320x160, black land, white sea)
 - `assets/title.png` (optional) — the title picture, any size; the build
-  scales it to fit the screen and converts it to a multicolour bitmap
-  (`TITLESCR` and `TITLEBMP` on the disk). It shows while the map and cities
-  load. Without it the game shows a text title.
-- `prepare_data.ps1` — turns the CSV and the map picture into `CITIES` and
-  `WORLDMAP` (49-byte city records loading to `$6000`; a hi-res bitmap
-  loading to `$2000`)
+  scales it to fit the screen and converts it to a multicolour bitmap. It
+  shows while the maps and cities load. Without it the game shows a text title.
+- `prepare_data.ps1` — makes `CITIES` (59-byte records loading to `$3900`),
+  `MAPS` (region table and RLE-packed maps loading to `$7400`) and the title
+  files; the record and file layouts are described at the top of each part
 - `build.bat` — KickAssembler build, D64 packaging, and optional VICE launch
 - `tools/build.sh`, `tools/prepare_data.py` — the same build for Linux/macOS
-- `tools/render_map.ps1` — remakes `assets/worldmap.png` from Natural Earth's
-  public-domain `ne_110m_land.geojson`
-
-The map uses an equirectangular projection: longitude -180..180 across the 320
-pixels and latitude 84°N..60°S down the 160 pixels (Antarctica is left out).
+- `tools/render_map.ps1` — draws `assets/maps/` from Natural Earth data

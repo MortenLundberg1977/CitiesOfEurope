@@ -19,6 +19,11 @@ mkdir -p build
 ka() { java -jar "$KICKASS_JAR" "$@" >build/kickass.log 2>&1 || { grep -v JAVA_TOOL build/kickass.log; exit 1; }; }
 ka src/worldcities.asm -odir ../build -symbolfile
 ka src/cityedit.asm -odir ../build
+# Keep the right/wrong answer counts the game saved in CITIES on the old disk.
+rm -f build/oldcities.prg
+if [ -f build/worldcities.d64 ]; then
+  c1541 build/worldcities.d64 -read cities build/oldcities.prg >/dev/null 2>&1 || true
+fi
 python3 "$TOOLS/prepare_data.py"
 
 # Like build.bat: a fresh disk each time. Names must be lowercase for c1541.
@@ -27,7 +32,7 @@ c1541 -format "worldcities,64" d64 build/worldcities.d64 \
   -write build/worldcities.prg worldcities \
   -write build/cityedit.prg cityedit \
   -write build/cities.prg cities \
-  -write build/worldmap.prg worldmap >/dev/null
+  -write build/maps.prg maps >/dev/null
 if [ -f assets/title.png ]; then
   c1541 build/worldcities.d64 -write build/titlescr.prg titlescr -write build/titlebmp.prg titlebmp >/dev/null
 fi

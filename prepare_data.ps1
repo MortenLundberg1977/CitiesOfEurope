@@ -36,49 +36,125 @@ function Format-Coordinate {
     return $text.PadLeft($Width)
 }
 
-# CITIES: 49-byte records "CITY(16),COUNTRY(16),LAT(6),LON(7)" + CR, then a 0 byte.
-# Loads to $6000; the game and CITYEDIT hold at most 250 records.
+# REGIONS: data\regions.csv. Each region's map is assets\maps\region<ID>.png,
+# drawn by tools\render_map.ps1 with the same corner (LON0, LAT0) and scale
+# (DX, DY: hundredths of a degree per pixel) that the game uses for the marker.
+$regions = @(Import-Csv (Join-Path $projectRoot "data\regions.csv"))
+for ($i = 0; $i -lt $regions.Count; $i++) {
+    if ([int]$regions[$i].ID -ne $i + 1) { throw "data\regions.csv: IDs must be 1, 2, 3... in order." }
+    if ($regions[$i].NAME.Length -gt 16) { throw "Region name '$($regions[$i].NAME)' is longer than 16 characters." }
+}
+
+# CITIES: 59-byte records, then a 0 byte. Loads to $3900 (the game) or $6000 (CITYEDIT).
+#   CITY(16),COUNTRY(16),LAT(6),LON(7),REGION(1),RIGHT(3),WRONG(3) + CR
+# RIGHT and WRONG count the player's answers; the game saves them to the disk.
+# build.bat copies CITIES off the old disk to build\oldcities.prg first, so the
+# counts carry over to the new disk (matched by city and country).
+$oldCounts = @{}
+$oldPath = Join-Path $buildDirectory "oldcities.prg"
+if (Test-Path $oldPath) {
+    $old = [System.IO.File]::ReadAllBytes($oldPath)
+    for ($o = 2; $o + 59 -le $old.Length -and $old[$o] -ne 0; $o += 59) {
+        if ($old[$o + 58] -ne 13) { break }          # an older record layout: no counts
+        $key = [System.Text.Encoding]::ASCII.GetString($old, $o, 33)
+        $oldCounts[$key] = [System.Text.Encoding]::ASCII.GetString($old, $o + 51, 7)
+    }
+    Remove-Item $oldPath
+}
 $records = New-Object System.Text.StringBuilder
 $lines = Get-Content (Join-Path $projectRoot "data\cities.csv") | Select-Object -Skip 1
 $count = 0
+$kept = 0
 foreach ($line in $lines) {
     $parts = $line.Trim().Split(",")
-    if ($parts.Length -lt 4 -or $parts[0] -eq "") { continue }
+    if ($parts.Length -lt 5 -or $parts[0] -eq "") { continue }
     $city = $parts[0].Trim().ToUpperInvariant()
     $country = $parts[1].Trim().ToUpperInvariant()
     if ($city.Length -gt 16) { throw "City name '$city' is longer than 16 characters." }
     if ($country.Length -gt 16) { throw "Country name '$country' is longer than 16 characters." }
     $lat = [double]::Parse($parts[2], $culture)
     $lon = [double]::Parse($parts[3], $culture)
-    $record = $city.PadRight(16) + "," + $country.PadRight(16) + "," +
-        (Format-Coordinate $lat 6) + "," + (Format-Coordinate $lon 7) + "`r"
+    $regionId = [int]$parts[4]
+    if ($regionId -lt 1 -or $regionId -gt $regions.Count) { throw "$city has an unknown region $regionId." }
+    $region = $regions[$regionId - 1]
+    $dlon = [Math]::Round($lon * 100) - [int]$region.LON0 * 100
+    if ($dlon -lt 0) { $dlon += 36000 }
+    $px = [Math]::Floor($dlon / [int]$region.DX)
+    $py = [Math]::Floor(([int]$region.LAT0 * 100 - [Math]::Round($lat * 100)) / [int]$region.DY)
+    if ($px -ge 320 -or $py -lt 0 -or $py -ge 160) { throw "$city is outside the $($region.NAME) map." }
+    $key = $city.PadRight(16) + "," + $country.PadRight(16)
+    $stats = "000,000"
+    if ($oldCounts.ContainsKey($key)) {
+        $stats = $oldCounts[$key]
+        if ($stats -ne "000,000") { $kept++ }
+    }
+    $record = $key + "," + (Format-Coordinate $lat 6) + "," + (Format-Coordinate $lon 7) + "," +
+        $regionId + "," + $stats + "`r"
     [void]$records.Append($record)
     $count++
 }
 if ($count -gt 250) { throw "data\cities.csv has $count cities; the game holds at most 250." }
-$cityBytes = [System.Text.Encoding]::ASCII.GetBytes($records.ToString()) + [byte]0
-Write-Prg "cities.prg" 0x6000 $cityBytes
-
-# WORLDMAP: assets\worldmap.png (320x160, dark = land) as a C64 hi-res bitmap
-# for text rows 0-19, loaded to $2000. Each 8x8 cell is 8 bytes, top to bottom;
-# bit 7 is the leftmost pixel. A set bit is land.
-Add-Type -AssemblyName System.Drawing
-$image = New-Object System.Drawing.Bitmap (Join-Path $projectRoot "assets\worldmap.png")
-if ($image.Width -ne 320 -or $image.Height -ne 160) {
-    throw "assets\worldmap.png must be 320x160 pixels."
+foreach ($region in $regions) {
+    $n = @($lines | Where-Object { $_.Trim().Split(",")[4] -eq $region.ID }).Count
+    if ($n -lt 3) { throw "Region $($region.NAME) needs at least 3 cities, has $n." }
 }
-$bitmap = New-Object byte[] 6400
-for ($y = 0; $y -lt 160; $y++) {
-    for ($x = 0; $x -lt 320; $x++) {
-        $pixel = $image.GetPixel($x, $y)
-        if (($pixel.R + $pixel.G + $pixel.B) -lt 384) {
-            $offset = [int][System.Math]::Floor($y / 8) * 320 + [int][System.Math]::Floor($x / 8) * 8 + ($y % 8)
-            $bitmap[$offset] = $bitmap[$offset] -bor (0x80 -shr ($x % 8))
+$cityBytes = [System.Text.Encoding]::ASCII.GetBytes($records.ToString()) + [byte]0
+Write-Prg "cities.prg" 0x3900 $cityBytes
+if ($kept) { Write-Output "Kept the answer counts of $kept cities from the old disk." }
+
+# MAPS: every region map as a hi-res bitmap (40x20 cells of 8 bytes, bit 7 = leftmost
+# pixel, set = land), packed with a simple RLE: $00 and $FF are followed by a run
+# length (1-255), other bytes are literal. Loads to $7400:
+#   count (1), then per region: LON0, LAT0 (signed words, hundredths of a degree),
+#   DX, DY (bytes), address of its packed map (word), name (16 chars)
+#   then the packed maps
+Add-Type -AssemblyName System.Drawing
+$mapsBase = 0x7400
+$header = New-Object System.Collections.Generic.List[byte]
+$packed = New-Object System.Collections.Generic.List[byte]
+$header.Add([byte]$regions.Count)
+$dataStart = $mapsBase + 1 + 24 * $regions.Count
+foreach ($region in $regions) {
+    $png = Join-Path $projectRoot ("assets\maps\region" + $region.ID + ".png")
+    if (-not (Test-Path $png)) { throw "$png is missing: run tools\render_map.ps1." }
+    $image = New-Object System.Drawing.Bitmap $png
+    if ($image.Width -ne 320 -or $image.Height -ne 160) { throw "$png must be 320x160 pixels." }
+    $bitmap = New-Object byte[] 6400
+    for ($y = 0; $y -lt 160; $y++) {
+        for ($x = 0; $x -lt 320; $x++) {
+            $pixel = $image.GetPixel($x, $y)
+            if (($pixel.R + $pixel.G + $pixel.B) -lt 384) {
+                $offset = [int][Math]::Floor($y / 8) * 320 + [int][Math]::Floor($x / 8) * 8 + ($y % 8)
+                $bitmap[$offset] = $bitmap[$offset] -bor (0x80 -shr ($x % 8))
+            }
         }
     }
+    $image.Dispose()
+    $address = $dataStart + $packed.Count
+    $i = 0
+    while ($i -lt 6400) {
+        $b = $bitmap[$i]
+        if ($b -eq 0 -or $b -eq 255) {
+            $run = 1
+            while ($i + $run -lt 6400 -and $run -lt 255 -and $bitmap[$i + $run] -eq $b) { $run++ }
+            $packed.Add($b); $packed.Add([byte]$run)
+            $i += $run
+        } else {
+            $packed.Add($b)
+            $i++
+        }
+    }
+    foreach ($word in @(([int]$region.LON0 * 100), ([int]$region.LAT0 * 100))) {
+        $header.Add([byte]($word -band 0xff)); $header.Add([byte](($word -shr 8) -band 0xff))
+    }
+    $header.Add([byte][int]$region.DX); $header.Add([byte][int]$region.DY)
+    $header.Add([byte]($address -band 0xff)); $header.Add([byte]($address -shr 8))
+    $header.AddRange([System.Text.Encoding]::ASCII.GetBytes($region.NAME.ToUpperInvariant().PadRight(16)))
 }
-$image.Dispose()
-Write-Prg "worldmap.prg" 0x2000 $bitmap
+$maps = $header.ToArray() + $packed.ToArray()
+if ($mapsBase + $maps.Length -gt 0xC000) { throw "The maps take $($maps.Length) bytes: too big for `$7400-`$BFFF." }
+Write-Prg "maps.prg" $mapsBase $maps
+Write-Output "Maps: $($maps.Length) bytes for $($regions.Count) regions."
 
 # TITLE: assets\title.png, any size, scaled to fit 320x200 and converted to a
 # multicolour bitmap (160x200, double-wide pixels). Each 4x8 cell gets black

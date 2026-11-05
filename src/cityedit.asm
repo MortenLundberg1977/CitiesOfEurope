@@ -1,7 +1,7 @@
 // ==============================================================
 // CITYEDIT - editor for the WORLDCITIES "CITIES" data file
 //
-// Record format (49 bytes):
+// Record format (59 bytes):
 //   city    cols  0..15   (16 chars, space padded)
 //   ","     col 16
 //   country cols 17..32   (16 chars, space padded)
@@ -9,8 +9,16 @@
 //   lat     cols 34..39   ( 6 chars, e.g. -55.68 or +12.34)
 //   ","     col 40
 //   lon     cols 41..47   ( 7 chars, e.g. +123.45)
-//   CR $0D  col 48
-// The file ends with a 0 byte. It is a PRG that loads to $6000.
+//   ","     col 48
+//   region  col  49       ( 1 char, the ID in data/regions.csv)
+//   ","     col 50
+//   right   cols 51..53   ( 3 digits, right answers; the game counts them)
+//   ","     col 54
+//   wrong   cols 55..57   ( 3 digits, wrong answers)
+//   CR $0D  col 58
+// The file ends with a 0 byte. It is a PRG; CITYEDIT loads it to $6000.
+// A city must lie inside its region's map frame, which only the build
+// checks: data/cities.csv is the better place to add cities.
 //
 // Assemble with build.bat (or: java -jar KickAss.jar src/cityedit.asm -odir ../build)
 // ==============================================================
@@ -31,7 +39,7 @@
 // ---------------- memory ----------------
 .label CITYBUF = $6000
 .label LINBUF = $C000          // field being edited
-.const RECLEN = 49
+.const RECLEN = 59
 .const RECMAX = 250            // same limit as the game
 .const NUMROWS = 20            // list rows on screen (rows 2..21)
 
@@ -296,12 +304,28 @@ br_loop:
         iny
         cpy #RECLEN-1
         bcc br_loop
+        ldy #51                 // counts start at 000,000
+        lda #$30
+br_zero:
+        sta (reclo),y
+        iny
+        cpy #58
+        bcc br_zero
+        lda #$31                // region 1
+        ldy #49
+        sta (reclo),y
         lda #$2C
         ldy #16
         sta (reclo),y
         ldy #33
         sta (reclo),y
         ldy #40
+        sta (reclo),y
+        ldy #48
+        sta (reclo),y
+        ldy #50
+        sta (reclo),y
+        ldy #54
         sta (reclo),y
         ldy #RECLEN-1
         lda #$0D
@@ -386,7 +410,7 @@ ke_loop:
         jsr edit_field
         inc fldcur
         lda fldcur
-        cmp #4
+        cmp #5                  // city, country, lat, lon, region
         bne ke_loop
         ldx #0
         ldy #10
@@ -762,10 +786,10 @@ close_ch:
 // --------------------------------------------------------------
 // field table: offset,len
 FLDTBL:
-        .byte 0,16, 17,16, 34,6, 41,7
+        .byte 0,16, 17,16, 34,6, 41,7, 49,1
 
 prompt_tbl:
-        .word msg_ed_city, msg_ed_country, msg_ed_lat, msg_ed_lon
+        .word msg_ed_city, msg_ed_country, msg_ed_lat, msg_ed_lon, msg_ed_region
 
 msg_title:
         .text "*** CITYEDIT ***"
@@ -810,6 +834,9 @@ msg_ed_lat:
         .byte 0
 msg_ed_lon:
         .text "LON    : "
+        .byte 0
+msg_ed_region:
+        .text "REGION : "
         .byte 0
 msg_ed_hint:
         .text "TYPE. RETURN=NEXT, DEL=BACKSPACE"
