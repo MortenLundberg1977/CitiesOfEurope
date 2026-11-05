@@ -7,6 +7,8 @@ REM   run           start the game in VICE after building
 REM   run editor    start CITYEDIT in VICE instead
 REM Examples: build.bat run / build.bat pull run / build.bat run editor
 
+REM Remember this script's path now: shift also moves %0.
+set "SELF=%~f0"
 if /I not "%~1"=="pull" goto pull_done
 shift
 where git >nul 2>nul
@@ -20,7 +22,7 @@ set "PULL_BRANCH="
 if not "%~1"=="" if /I not "%~1"=="run" set "PULL_BRANCH=%~1"
 if defined PULL_BRANCH shift
 REM git may replace this file, so update and restart the script on one line.
-if defined PULL_BRANCH (git checkout "%PULL_BRANCH%" && git pull --ff-only && "%~f0" %1 %2) else (git pull --ff-only && "%~f0" %1 %2)
+if defined PULL_BRANCH (git checkout "%PULL_BRANCH%" && git pull --ff-only && "%SELF%" %1 %2) else (git pull --ff-only && "%SELF%" %1 %2)
 echo Could not update from GitHub. Commit or stash your local changes first.
 exit /b 1
 :pull_done
