@@ -38,7 +38,7 @@ if not exist build mkdir build
 if defined JAVA_HOME if exist "%JAVA_HOME%\bin\java.exe" set "JAVA_EXE=%JAVA_HOME%\bin\java.exe"
 if not defined JAVA_EXE set "JAVA_EXE=java"
 REM -odir is relative to the source file, so ..\build is this folder's build.
-"%JAVA_EXE%" -jar "%KICKASS_JAR%" "src\worldcities.asm" -odir ..\build -symbolfile
+"%JAVA_EXE%" -jar "%KICKASS_JAR%" "src\citiesofeurope.asm" -odir ..\build -symbolfile
 if errorlevel 1 exit /b 1
 "%JAVA_EXE%" -jar "%KICKASS_JAR%" "src\cityedit.asm" -odir ..\build
 if errorlevel 1 exit /b 1
@@ -53,7 +53,7 @@ if errorlevel 1 (
 REM The game saves each city's right/wrong answer counts in CITIES on the disk.
 REM Copy that file off the old disk so prepare_data.ps1 can carry the counts over.
 if exist "build\oldcities.prg" del "build\oldcities.prg"
-if exist "build\worldcities.d64" "%C1541_EXE%" "build\worldcities.d64" -read cities "build\oldcities.prg" >nul 2>nul
+if exist "build\citiesofeurope.d64" "%C1541_EXE%" "build\citiesofeurope.d64" -read cities "build\oldcities.prg" >nul 2>nul
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "prepare_data.ps1"
 if errorlevel 1 exit /b 1
@@ -62,23 +62,23 @@ REM The disk is made fresh each time from data\cities.csv, data\regions.csv and 
 REM maps in assets\maps (with the answer counts from the old disk).
 REM Disk filenames must be lowercase: c1541 stores uppercase ASCII as shifted
 REM PETSCII, which the programs' LOAD calls ("CITIES", "MAPS") never match.
-if exist "build\worldcities.d64" del "build\worldcities.d64"
-if exist "build\worldcities.d64" (
-    echo build\worldcities.d64 is in use. Close VICE and build again.
+if exist "build\citiesofeurope.d64" del "build\citiesofeurope.d64"
+if exist "build\citiesofeurope.d64" (
+    echo build\citiesofeurope.d64 is in use. Close VICE and build again.
     exit /b 1
 )
-"%C1541_EXE%" -format "worldcities,64" d64 "build\worldcities.d64" -write "build\worldcities.prg" worldcities -write "build\cityedit.prg" cityedit -write "build\cities.prg" cities -write "build\maps.prg" maps
+"%C1541_EXE%" -format "europe,64" d64 "build\citiesofeurope.d64" -write "build\citiesofeurope.prg" citiesofeurope -write "build\cityedit.prg" cityedit -write "build\cities.prg" cities -write "build\maps.prg" maps -write "build\flags.prg" flags
 if errorlevel 1 exit /b 1
 REM The title picture is optional: without assets\title.png the game shows a text title.
 if exist "assets\title.png" (
-    "%C1541_EXE%" "build\worldcities.d64" -write "build\titlescr.prg" titlescr -write "build\titlebmp.prg" titlebmp
+    "%C1541_EXE%" "build\citiesofeurope.d64" -write "build\titlescr.prg" titlescr -write "build\titlebmp.prg" titlebmp
     if errorlevel 1 exit /b 1
 )
 
-echo Built build\worldcities.prg and build\worldcities.d64
+echo Built build\citiesofeurope.prg and build\citiesofeurope.d64
 if /I not "%~1"=="run" goto :eof
 if /I "%~2"=="editor" (
-    x64sc -8 "build\worldcities.d64" -autostart "build\cityedit.prg"
+    x64sc -8 "build\citiesofeurope.d64" -autostart "build\cityedit.prg"
 ) else (
-    x64sc -8 "build\worldcities.d64" -autostart "build\worldcities.prg"
+    x64sc -8 "build\citiesofeurope.d64" -autostart "build\citiesofeurope.prg"
 )

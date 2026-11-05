@@ -77,10 +77,10 @@ foreach ($line in $lines) {
     $regionId = [int]$parts[4]
     if ($regionId -lt 1 -or $regionId -gt $regions.Count) { throw "$city has an unknown region $regionId." }
     $region = $regions[$regionId - 1]
-    $dlon = [Math]::Round($lon * 100) - [int]$region.LON0 * 100
+    $dlon = [Math]::Round($lon * 100) - [Math]::Round([double]::Parse($region.LON0, $culture) * 100)
     if ($dlon -lt 0) { $dlon += 36000 }
     $px = [Math]::Floor($dlon / [int]$region.DX)
-    $py = [Math]::Floor(([int]$region.LAT0 * 100 - [Math]::Round($lat * 100)) / [int]$region.DY)
+    $py = [Math]::Floor(([Math]::Round([double]::Parse($region.LAT0, $culture) * 100) - [Math]::Round($lat * 100)) / [int]$region.DY)
     if ($px -ge 320 -or $py -lt 0 -or $py -ge 160) { throw "$city is outside the $($region.NAME) map." }
     $key = $city.PadRight(16) + "," + $country.PadRight(16)
     $stats = "000,000"
@@ -144,7 +144,7 @@ foreach ($region in $regions) {
             $i++
         }
     }
-    foreach ($word in @(([int]$region.LON0 * 100), ([int]$region.LAT0 * 100))) {
+    foreach ($word in @(([Math]::Round([double]::Parse($region.LON0, $culture) * 100)), ([Math]::Round([double]::Parse($region.LAT0, $culture) * 100)))) {
         $header.Add([byte]($word -band 0xff)); $header.Add([byte](($word -shr 8) -band 0xff))
     }
     $header.Add([byte][int]$region.DX); $header.Add([byte][int]$region.DY)
@@ -152,9 +152,58 @@ foreach ($region in $regions) {
     $header.AddRange([System.Text.Encoding]::ASCII.GetBytes($region.NAME.ToUpperInvariant().PadRight(16)))
 }
 $maps = $header.ToArray() + $packed.ToArray()
-if ($mapsBase + $maps.Length -gt 0xC000) { throw "The maps take $($maps.Length) bytes: too big for `$7400-`$BFFF." }
+$flagsBase = 0xB000
+if ($mapsBase + $maps.Length -gt $flagsBase) { throw "The maps take $($maps.Length) bytes: too big for `$7400-`$AFFF." }
 Write-Prg "maps.prg" $mapsBase $maps
 Write-Output "Maps: $($maps.Length) bytes for $($regions.Count) regions."
+
+# FLAGS: data\flags.txt, one 12x16 grid of colour letters per country, as
+# multicolour sprites. Loads to $B000: count (1), then per flag 84 bytes:
+#   country name (16), colour for bits 01 ($D025), 10 (sprite colour), 11 ($D026),
+#   spare (1), sprite (64: 3 bytes per row, 16 rows used)
+$letters = "KWRCPGBYONLDMEAS"     # C64 colours 0-15
+$flagLines = @(Get-Content (Join-Path $projectRoot "data\flags.txt") | Where-Object { $_.Trim() -ne "" -and -not $_.StartsWith("#") })
+if ($flagLines.Count % 17 -ne 0) { throw "data\flags.txt: each flag is a name line and 16 rows of 12 letters." }
+$flagBytes = New-Object System.Collections.Generic.List[byte]
+$flagBytes.Add([byte]($flagLines.Count / 17))
+$flagNames = @{}
+for ($f = 0; $f -lt $flagLines.Count; $f += 17) {
+    $name = $flagLines[$f].Trim().ToUpperInvariant()
+    if ($name.Length -gt 16) { throw "Flag name '$name' is longer than 16 characters." }
+    $flagNames[$name] = $true
+    $colours = New-Object System.Collections.Generic.List[int]
+    $sprite = New-Object byte[] 64
+    for ($y = 0; $y -lt 16; $y++) {
+        $row = $flagLines[$f + 1 + $y].Trim().ToUpperInvariant()
+        if ($row.Length -ne 12) { throw "Flag $name, row $($y + 1): needs 12 letters." }
+        for ($x = 0; $x -lt 12; $x++) {
+            $c = $letters.IndexOf($row[$x])
+            if ($c -lt 0) { throw "Flag $name, row $($y + 1): unknown colour letter '$($row[$x])'." }
+            if ($c -eq 0) { continue }                       # K: see-through
+            $slot = $colours.IndexOf($c)
+            if ($slot -lt 0) {
+                if ($colours.Count -eq 3) { throw "Flag $name has more than 3 colours besides K." }
+                $colours.Add($c); $slot = $colours.Count - 1
+            }
+            $bits = $slot + 1                                # 01, 10, 11
+            $byte = $y * 3 + [Math]::Floor($x / 4)
+            $sprite[$byte] = $sprite[$byte] -bor ($bits -shl (6 - 2 * ($x % 4)))
+        }
+    }
+    while ($colours.Count -lt 3) { $colours.Add(0) }
+    $flagBytes.AddRange([System.Text.Encoding]::ASCII.GetBytes($name.PadRight(16)))
+    $flagBytes.Add([byte]$colours[0]); $flagBytes.Add([byte]$colours[1]); $flagBytes.Add([byte]$colours[2]); $flagBytes.Add(0)
+    $flagBytes.AddRange($sprite)
+}
+foreach ($line in $lines) {
+    $parts = $line.Trim().Split(",")
+    if ($parts.Length -lt 2) { continue }
+    $country = $parts[1].Trim().ToUpperInvariant()
+    if ($country -and -not $flagNames.ContainsKey($country)) { throw "No flag for $country in data\flags.txt." }
+}
+if ($flagsBase + $flagBytes.Count -gt 0xC000) { throw "Too many flags for `$B000-`$BFFF." }
+Write-Prg "flags.prg" $flagsBase $flagBytes.ToArray()
+Write-Output "Flags: $($flagNames.Count)."
 
 # TITLE: assets\title.png, any size, scaled to fit 320x200 and converted to a
 # multicolour bitmap (160x200, double-wide pixels). Each 4x8 cell gets black

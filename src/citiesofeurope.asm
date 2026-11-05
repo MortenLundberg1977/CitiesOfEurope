@@ -1,5 +1,5 @@
 // ==============================================================
-// WORLDCITIES - a "name the capital" game for the Commodore 64
+// CITIES OF EUROPE - a "name the city" game for the Commodore 64
 //
 // Files on disk (device 8), made by build.bat / tools/build.sh:
 //   MAPS     - the region maps (see prepare_data.ps1), loaded to $7400
@@ -18,7 +18,7 @@
 //   x = (lon - LON0) / DX, y = (LAT0 - lat) / DY
 // in hundredths of a degree; the longitude difference wraps at 360.
 //
-// Assemble with build.bat (or: java -jar KickAss.jar src/worldcities.asm -odir ../build)
+// Assemble with build.bat (or: java -jar KickAss.jar src/citiesofeurope.asm -odir ../build)
 // ==============================================================
 
 .encoding "petscii_upper"
@@ -40,6 +40,10 @@
 .label CITYBUF = $3900         // city data buffer (up to $7316)
 .label MAPS = $7400            // region table + packed maps (up to $BFFF; BASIC ROM is off)
 .label SPRITE = $0380          // marker sprite (block 14)
+.label FLAGSPR = $02C0         // flag sprite (block 11, free RAM)
+.label FLAGNAME = $03C0        // 16 bytes: country being looked up
+.label FLAGS = $B000           // flag table (see prepare_data.ps1)
+.const FLAGLEN = 84            // flag table entry
 .label TITLESCR = $C000        // title colours: screen, colour RAM (+$400), background (+$7E8)
 .label TITLEBMP = $E000        // title bitmap, in the RAM under the KERNAL ROM
 .const RECLEN = 59             // 58 chars + CR
@@ -158,6 +162,7 @@ main:
         jsr title_on
 ld_data:
         jsr load_map
+        jsr load_flags
         jsr load_cities
         lda #1
         sta loaded
@@ -216,6 +221,7 @@ roundloop:
         jsr parse_coords
         jsr calc_pixel
         jsr show_marker
+        jsr show_flag           // the country's flag as a hint
         jsr choose_options
         jsr print_question
         jsr get_answer          // A = key "1".."3"
@@ -382,6 +388,25 @@ load_map:
         bcc lm_ok
         jmp load_err
 lm_ok:
+        jmp close_ch
+
+// load FLAGS: the flag sprites
+load_flags:
+        lda #fn_titlescr-fn_flags
+        ldx #<fn_flags
+        ldy #>fn_flags
+        jsr SETNAM
+        lda #2
+        ldx #8
+        ldy #0
+        jsr SETLFS
+        lda #0
+        ldx #<FLAGS
+        ldy #>FLAGS
+        jsr LOAD
+        bcc lf_ok
+        jmp load_err
+lf_ok:
         jmp close_ch
 
 // --------------------------------------------------------------
@@ -824,8 +849,11 @@ mm_spr:
         bpl mm_spr
         lda #SPRITE/64
         sta SCREEN+$3F8
+        lda #FLAGSPR/64
+        sta SCREEN+$3F9
         lda #0
-        sta $D015               // marker hidden until a round starts
+        sta $D015               // marker and flag hidden until a round starts
+        lda #%00000010          // sprite 1 (the flag): multicolour, double size
         sta $D017
         sta $D01D
         sta $D01C
@@ -1320,9 +1348,81 @@ show_marker:
         sta $D015
         rts
 
-hide_marker:
+hide_marker:                    // the marker and the flag
         lda #0
         sta $D015
+        rts
+
+// --------------------------------------------------------------
+// show_flag: the flag of the answer's country as sprite 1, to the right
+// of the answers. Call after show_marker (which rewrites $D010).
+// --------------------------------------------------------------
+show_flag:
+        jsr get_recptr_ans
+        ldy #F_COUNTRY          // copy the country name
+        ldx #0
+sf_copy:
+        lda (reclo),y
+        sta FLAGNAME,x
+        iny
+        inx
+        cpx #16
+        bne sf_copy
+        lda #<(FLAGS+1)
+        sta ptr
+        lda #>(FLAGS+1)
+        sta ptr+1
+        ldx FLAGS               // number of flags
+        beq sf_none
+sf_next:
+        ldy #15
+sf_cmp:
+        lda (ptr),y
+        cmp FLAGNAME,y
+        bne sf_skip
+        dey
+        bpl sf_cmp
+        // found: colours, then the sprite
+        ldy #16
+        lda (ptr),y
+        sta $D025               // bits 01
+        iny
+        lda (ptr),y
+        sta $D028               // bits 10: sprite 1's own colour
+        iny
+        lda (ptr),y
+        sta $D026               // bits 11
+        ldy #20
+        ldx #0
+sf_spr:
+        lda (ptr),y
+        sta FLAGSPR,x
+        iny
+        inx
+        cpx #64
+        bne sf_spr
+        lda #<(24+272)          // x 272-319 on screen
+        sta $D002
+        lda #50+168             // text row 21
+        sta $D003
+        lda $D010
+        ora #%00000010          // x is above 255
+        sta $D010
+        lda $D015
+        ora #%00000010
+        sta $D015
+        rts
+sf_skip:
+        clc
+        lda ptr
+        adc #FLAGLEN
+        sta ptr
+        bcc sf_n2
+        inc ptr+1
+sf_n2:
+        dex
+        bne sf_next
+sf_none:
         rts
 
 // --------------------------------------------------------------
@@ -1629,13 +1729,13 @@ marker_shape:
 // strings and filenames
 // --------------------------------------------------------------
 msg_title:
-        .text "**** WORLDCITIES ****"
+        .text "** CITIES OF EUROPE **"
         .byte $0D, $0D
-        .text "10 CAPITALS WILL BE MARKED ON THE MAP."
+        .text "10 CITIES WILL BE MARKED ON THE MAP,"
         .byte $0D
-        .text "PICK THE RIGHT CITY FROM THREE"
+        .text "WITH THE FLAG OF THEIR COUNTRY. PICK"
         .byte $0D
-        .text "CHOICES USING KEYS 1-3."
+        .text "THE RIGHT CITY USING KEYS 1-3."
         .byte $0D, $0D
         .text "PRESS SPACE TO START"
         .byte $0D, $0D, 0
@@ -1676,6 +1776,8 @@ msg_noseve:
         .text "COULD NOT SAVE THE SCORES TO DISK"
         .byte 0
 
+fn_flags:
+        .text "FLAGS"
 fn_titlescr:
         .text "TITLESCR"
 fn_titlebmp:

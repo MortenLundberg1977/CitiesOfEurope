@@ -26,5 +26,5 @@ jobs:
       - name: Upload disk image
         uses: actions/upload-artifact@v4
         with:
-          name: worldcities-d64
-          path: build/worldcities.d64
+          name: citiesofeurope-d64
+          path: build/citiesofeurope.d64

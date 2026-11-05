@@ -1,27 +1,45 @@
-# World Cities
+# Cities of Europe
 
-A "name the capital" game for the Commodore 64, written in 6502 assembly
-with KickAssembler, plus a companion data-file editor.
+A "name the city" game for the Commodore 64, written in 6502 assembly with
+KickAssembler, plus a companion data-file editor. It is the European edition
+of [WorldCities](https://github.com/MortenLundberg1977/WorldCities): the same
+game, zoomed in on Europe, with 200 cities instead of the world's capitals and
+the country's flag as a hint.
 
 ## Gameplay
 
 Press Space on the title screen once the disk has stopped loading (about a
-minute on a real 1541; use warp in VICE to skip the wait). Ten capitals are
-marked one by one with a flashing ring on a hi-res map of their part of the
-world: Europe, Middle East, Africa, Asia, Oceania, North & Central America or
-South America. Pick the right city from three choices with keys **1-3**; the
-two wrong choices come from the same region. After each answer the game shows
-the city and its country; press Space for the next one. At the end you get
-your score out of 10, and Space starts a new game. A right answer plays a
-rising chime, a wrong one a low buzz.
+minute on a real 1541; use warp in VICE to skip the wait). Ten cities are
+marked one by one with a flashing ring on a hi-res map of their part of
+Europe: British Isles, Iberia, France & Benelux, Central Europe, Italy &
+Balkans, Nordic & Baltic or Eastern Europe. The flag of the city's country is
+shown next to the answers as a hint. Pick the right city from three choices
+with keys **1-3**; the two wrong choices come from the same part of Europe.
+After each answer the game shows the city and its country; press Space for the
+next one. At the end you get your score out of 10, and Space starts a new
+game. A right answer plays a rising chime, a wrong one a low buzz.
 
 The game counts right and wrong answers for every city and saves the counts
 to the CITIES file on the disk after each game ("SAVING SCORES..."). The
 counts are kept when you rebuild the disk.
 
-The city list (`data/cities.csv`) has the capitals of all 193 UN member
-states plus Vatican City, Palestine, Kosovo and Taiwan: 197 in all. The game
-holds up to 250.
+The city list (`data/cities.csv`) has 200 cities in 47 countries: the
+capitals and the best-known big cities. The game holds up to 250.
+
+## Flags
+
+`data/flags.txt` has one flag per country: a name line (as in the `COUNTRY`
+column of `cities.csv`) and 16 rows of 12 colour letters. The game shows it as
+a double-size multicolour sprite, so each letter is a 4x2-pixel block. A flag
+can use at most 3 colours besides `K` (black, see-through); the letters are
+listed at the top of the file. Edit a flag there and rebuild; the build stops
+if a country has no flag or a flag has too many colours.
+
+## Title screen
+
+`assets/title.png` is drawn by `tools/draw_title.ps1` (sky, banner, a map of
+Europe, compass and suitcase, in C64 colours); the build converts it to a
+multicolour bitmap. Replace the PNG with any picture to change it.
 
 ## Build and run
 
@@ -45,20 +63,20 @@ VICE; `run editor` starts CITYEDIT instead. Close VICE before building: the
 build can't replace a disk that VICE has open.
 
 The script assembles both programs, makes the data files with
-`prepare_data.ps1`, and writes a fresh `build\worldcities.d64` with
-`WORLDCITIES`, `CITYEDIT`, `CITIES`, `MAPS`, `TITLESCR` and `TITLEBMP`. The
+`prepare_data.ps1`, and writes a fresh `build\citiesofeurope.d64` with
+`CITIESOFEUROPE`, `CITYEDIT`, `CITIES`, `MAPS`, `FLAGS`, `TITLESCR` and `TITLEBMP`. The
 cities come from `data/cities.csv`, with the answer counts copied from the old
 disk (matched by city and country). Other changes saved with CITYEDIT are lost
 on the next build: to keep a city, add it to `data/cities.csv`.
 
 On Linux or macOS use `tools/build.sh` (needs Python 3 with Pillow). The
 GitHub Actions workflow runs it on every push: open the latest **Build** run
-on the **Actions** tab and download the **worldcities-d64** artifact.
+on the **Actions** tab and download the **citiesofeurope-d64** artifact.
 
 On a C64 or in VICE without autostart:
 
 ```
-LOAD"WORLDCITIES",8,1
+LOAD"CITIESOFEUROPE",8,1
 RUN
 ```
 
@@ -72,7 +90,7 @@ degrees of latitude. The same numbers are used to draw the map
 
 ```
 x = (lon − LON0) / DX      the difference wraps at 360°, so a region may
-y = (LAT0 − lat) / DY      cross the 180° line (Oceania does)
+y = (LAT0 − lat) / DY      cross the 180° line (useful for Pacific maps)
 ```
 
 so the marker always lands where the city is on the map. `DY` is a little
@@ -105,7 +123,7 @@ check that a city fits its region's map; the build does.
 
 ## Project files
 
-- `src/worldcities.asm` — the game: loading, region maps (unpacked into a
+- `src/citiesofeurope.asm` — the game: loading, region maps (unpacked into a
   bitmap with a raster split to text for the bottom five rows), marker sprite,
   questions, score, answer counts
 - `src/cityedit.asm` — the CITIES editor
@@ -122,3 +140,5 @@ check that a city fits its region's map; the build does.
 - `build.bat` — KickAssembler build, D64 packaging, and optional VICE launch
 - `tools/build.sh`, `tools/prepare_data.py` — the same build for Linux/macOS
 - `tools/render_map.ps1` — draws `assets/maps/` from Natural Earth data
+- `tools/draw_title.ps1` — draws `assets/title.png`
+- `data/flags.txt` — the flags, as letter grids

@@ -6,7 +6,7 @@
 # The GeoJSON is public domain: https://github.com/nvkelso/natural-earth-vector
 # (geojson/ne_50m_land.geojson).
 #
-# Projection, the same one src/worldcities.asm (calc_pixel) uses to place the marker:
+# Projection, the same one src/citiesofeurope.asm (calc_pixel) uses to place the marker:
 #   x = (lon - LON0) / DX     longitude wraps, so a region may cross 180 degrees
 #   y = (LAT0 - lat) / DY     DX and DY are hundredths of a degree per pixel
 param([Parameter(Mandatory = $true)][string]$GeoJson)

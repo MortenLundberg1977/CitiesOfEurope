@@ -66,11 +66,11 @@ def cities(regions):
             if not 1 <= rid <= len(regions):
                 raise SystemExit(f"{city} has an unknown region {rid}.")
             r = regions[rid - 1]
-            dlon = round(lon * 100) - int(r["LON0"]) * 100
+            dlon = round(lon * 100) - round(float(r["LON0"]) * 100)
             if dlon < 0:
                 dlon += 36000
             px = dlon // int(r["DX"])
-            py = (int(r["LAT0"]) * 100 - round(lat * 100)) // int(r["DY"])
+            py = (round(float(r["LAT0"]) * 100) - round(lat * 100)) // int(r["DY"])
             if px >= 320 or py < 0 or py >= 160:
                 raise SystemExit(f"{city} is outside the {r['NAME']} map.")
             per_region[rid - 1] += 1
@@ -121,16 +121,58 @@ def maps(regions):
             else:
                 packed.append(b)
                 i += 1
-        for word in (int(r["LON0"]) * 100, int(r["LAT0"]) * 100):
+        for word in (round(float(r["LON0"]) * 100), round(float(r["LAT0"]) * 100)):
             header += (word & 0xFFFF).to_bytes(2, "little")
         header += bytes([int(r["DX"]), int(r["DY"])])
         header += address.to_bytes(2, "little")
         header += r["NAME"].upper().ljust(16).encode("ascii")
     data = header + packed
-    if base + len(data) > 0xC000:
-        raise SystemExit(f"The maps take {len(data)} bytes: too big for $7400-$BFFF.")
+    if base + len(data) > 0xB000:
+        raise SystemExit(f"The maps take {len(data)} bytes: too big for $7400-$AFFF.")
     write_prg("maps.prg", base, data)
     print(f"Maps: {len(data)} bytes for {len(regions)} regions.")
+
+
+def flags():
+    """data/flags.txt -> build/flags.prg (multicolour sprites, see prepare_data.ps1)."""
+    letters = "KWRCPGBYONLDMEAS"
+    lines = [l.strip() for l in open(os.path.join(ROOT, "data", "flags.txt"))
+             if l.strip() and not l.startswith("#")]
+    if len(lines) % 17:
+        raise SystemExit("data/flags.txt: each flag is a name line and 16 rows of 12 letters.")
+    out = bytearray([len(lines) // 17])
+    names = set()
+    for f in range(0, len(lines), 17):
+        name = lines[f].upper()
+        if len(name) > 16:
+            raise SystemExit(f"Flag name {name} is longer than 16 characters.")
+        names.add(name)
+        colours, sprite = [], bytearray(64)
+        for y in range(16):
+            row = lines[f + 1 + y].upper()
+            if len(row) != 12:
+                raise SystemExit(f"Flag {name}, row {y + 1}: needs 12 letters.")
+            for x, ch in enumerate(row):
+                c = letters.find(ch)
+                if c < 0:
+                    raise SystemExit(f"Flag {name}, row {y + 1}: unknown colour letter {ch}.")
+                if c == 0:
+                    continue
+                if c not in colours:
+                    if len(colours) == 3:
+                        raise SystemExit(f"Flag {name} has more than 3 colours besides K.")
+                    colours.append(c)
+                sprite[y * 3 + x // 4] |= (colours.index(c) + 1) << (6 - 2 * (x % 4))
+        colours += [0] * (3 - len(colours))
+        out += name.ljust(16).encode("ascii") + bytes(colours) + b"\0" + sprite
+    with open(os.path.join(ROOT, "data", "cities.csv")) as f:
+        next(f)
+        for line in f:
+            parts = line.strip().split(",")
+            if len(parts) > 1 and parts[1].strip().upper() not in names:
+                raise SystemExit(f"No flag for {parts[1].strip()} in data/flags.txt.")
+    write_prg("flags.prg", 0xB000, out)
+    print(f"Flags: {len(names)}.")
 
 
 
@@ -185,4 +227,5 @@ if __name__ == "__main__":
     regions = load_regions()
     cities(regions)
     maps(regions)
+    flags()
     title()

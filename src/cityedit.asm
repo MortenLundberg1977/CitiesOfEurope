@@ -1,5 +1,5 @@
 // ==============================================================
-// CITYEDIT - editor for the WORLDCITIES "CITIES" data file
+// CITYEDIT - editor for the CITIES OF EUROPE "CITIES" data file
 //
 // Record format (59 bytes):
 //   city    cols  0..15   (16 chars, space padded)
@@ -794,7 +794,7 @@ prompt_tbl:
 msg_title:
         .text "*** CITYEDIT ***"
         .byte $0D, $0D
-        .text "EDITOR FOR THE WORLDCITIES CITIES FILE."
+        .text "EDITOR FOR THE CITIES OF EUROPE DATA."
         .byte $0D
         .text "EDITS CITIES ON DEVICE 8."
         .byte $0D, $0D
