@@ -6,6 +6,21 @@ of [WorldCities](https://github.com/MortenLundberg1977/WorldCities): the same
 game, zoomed in on Europe, with 200 cities instead of the world's capitals and
 the country's flag as a hint.
 
+## Screenshots
+
+Taken in the VICE emulator.
+
+| | |
+|---|---|
+| ![Title screen: the Cities of Europe banner over a map of Europe, with a compass and a suitcase](docs/screenshots/title.png) | ![A question on the Iberia map: a ring marks Barcelona, with three choices](docs/screenshots/question.png) |
+| The title screen | A question: which city is marked? |
+| ![The first hint: the Spanish flag next to the choices](docs/screenshots/hint-flag.png) | ![The second hint, 50/50: one wrong choice is gone](docs/screenshots/hint-fifty-fifty.png) |
+| Hint 1: the country's flag | Hint 2: 50/50 |
+| ![A right answer for Paris, 5 points, with the Eiffel Tower on the map](docs/screenshots/answer-landmark.png) | ![The high-score table](docs/screenshots/high-scores.png) |
+| A quick right answer with no hint: 5 points, and a landmark | The high-score table, saved on the disk |
+| ![The stats screen: the cities you miss most and your totals](docs/screenshots/stats.png) | |
+| Your stats: the cities you miss most | |
+
 ## Gameplay
 
 The title picture comes up first while the rest of the disk loads (about two
@@ -110,21 +125,52 @@ RUN
 Each region in `data/regions.csv` has a top-left corner (`LON0`, `LAT0`, in
 degrees) and a scale (`DX`, `DY`: hundredths of a degree per pixel). Its map is
 320x160 pixels, so it covers `3.2 × DX` degrees of longitude and `1.6 × DY`
-degrees of latitude. The same numbers are used to draw the map
-(`tools/render_map.ps1`) and to place the marker in the game:
+degrees of latitude. Each city has a region number in the `REGION` column of
+`data/cities.csv`. The build stops if a city lies outside its region's map,
+or if a region has fewer than 3 cities.
+
+### How the game turns latitude and longitude into a spot on the map
+
+The maps use an equirectangular projection: degrees of longitude map straight
+to pixels across, degrees of latitude straight to pixels down. The C64 works
+it out for every question, with whole numbers only (the 6502 has no
+fractions and no divide instruction). `calc_pixel` in `src/game.asm` does it:
+
+1. **Read the coordinates.** Each city record holds them as text, e.g.
+   `+48.86` and `  +2.35`. `parse_num` reads the sign, the degrees and two
+   decimals, and makes a signed 16-bit number in hundredths of a degree:
+   `+48.86` → 4886, `-9.14` → −914.
+2. **Look up the region.** The `MAPS` file starts with a table of the regions:
+   corner (`LON0`, `LAT0`, also in hundredths) and scale (`DX`, `DY`). They are
+   the numbers from `data/regions.csv`.
+3. **Measure from the corner.** Subtract: `lon − LON0` is how far east of the
+   map's left edge the city is, `LAT0 − lat` how far south of its top edge.
+   If the longitude difference comes out negative, 360° (36000) is added, so
+   a map may cross the 180° line.
+4. **Divide by the scale.** `x = (lon − LON0) / DX` and
+   `y = (LAT0 − lat) / DY`, with a 16-bit shift-and-subtract division
+   (`div16`). The result is the pixel: x 0-319, y 0-159.
+5. **Place the marker.** The marker is a sprite. The visible screen starts at
+   sprite position (24, 50) and the ring's centre is 5 pixels in, so the
+   sprite goes to (x + 19, y + 45); x above 255 sets the sprite's 9th x bit.
+
+Example, Paris (48.86 N, 2.35 E) on the France & Benelux map (`LON0` −5,
+`LAT0` 53.5, `DX` 7, `DY` 7):
 
 ```
-x = (lon − LON0) / DX      the difference wraps at 360°, so a region may
-y = (LAT0 − lat) / DY      cross the 180° line (useful for Pacific maps)
+x = (235 − (−500)) / 7 = 735 / 7 = 105
+y = (5350 − 4886) / 7  = 464 / 7 = 66      → sprite at (124, 111)
 ```
 
-so the marker always lands where the city is on the map. `DY` is a little
-larger than `DX × cos(latitude)` would make it, which stretches the maps
-vertically so the regions fill the 2:1 map area.
+The maps themselves are drawn by `tools/render_map.ps1` with the very same
+formula and the same numbers, so a city's marker always lands where the city
+is on the map. Nothing has to be lined up by hand: change a region in
+`regions.csv`, redraw the maps, and the marker follows.
 
-Each city has a region number in the `REGION` column of `data/cities.csv`.
-The build stops if a city lies outside its region's map, or if a region has
-fewer than 3 cities.
+The pixels aren't square in degrees: `DY` is a little larger than
+`DX × cos(latitude)` would make it, which stretches the maps vertically so
+the regions fill the 2:1 map area. The stretch is the same for the map and
+the marker, so it doesn't move the marker off its city.
 
 To change a region, edit `data/regions.csv` and redraw the maps:
 
