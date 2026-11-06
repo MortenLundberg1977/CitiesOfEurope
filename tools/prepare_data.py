@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Python port of prepare_data.ps1: builds build/cities.prg, build/maps.prg and the
-title files. See prepare_data.ps1 for the file layouts.
+"""Python port of prepare_data.ps1 (see there for the file layouts): builds
+build/cities.prg, maps.prg, landmarks.prg, hiscores.prg, flags.prg (if
+data/flags.txt exists) and title.prg (if assets/title.png exists).
 Usage: python3 tools/prepare_data.py   (run from anywhere; needs Pillow)
 """
 import csv
 import os
+import shutil
 from PIL import Image
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = os.path.join(ROOT, "build")
+LETTERS = "KWRCPGBYONLDMEAS"   # C64 colours 0-15
+MAPS_BASE = 0x6C40
 
 
 def write_prg(name, load_address, data):
@@ -23,6 +27,48 @@ def coord(value, width):
     return text.rjust(width)
 
 
+def rle(data):
+    """$00 and $FF are followed by a run length (1-255), other bytes are literal."""
+    out, i = bytearray(), 0
+    while i < len(data):
+        b = data[i]
+        if b in (0, 255):
+            run = 1
+            while i + run < len(data) and run < 255 and data[i + run] == b:
+                run += 1
+            out += bytes([b, run])
+            i += run
+        else:
+            out.append(b)
+            i += 1
+    return out
+
+
+def packbits(data):
+    """0-127: that many + 1 literal bytes follow; 128-255: one byte, repeated control - 125 times."""
+    out, i, n = bytearray(), 0, len(data)
+    while i < n:
+        run = 1
+        while i + run < n and run < 130 and data[i + run] == data[i]:
+            run += 1
+        if run >= 3:
+            out += bytes([128 + run - 3, data[i]])
+            i += run
+        else:
+            j = i
+            while j < n and j - i < 128:
+                r = 1
+                while j + r < n and r < 3 and data[j + r] == data[j]:
+                    r += 1
+                if r >= 3:
+                    break
+                j += 1
+            out.append(j - i - 1)
+            out += data[i:j]
+            i = j
+    return out
+
+
 def load_regions():
     with open(os.path.join(ROOT, "data", "regions.csv")) as f:
         regions = list(csv.DictReader(f))
@@ -32,6 +78,17 @@ def load_regions():
         if len(r["NAME"]) > 16:
             raise SystemExit(f"Region name {r['NAME']} is longer than 16 characters.")
     return regions
+
+
+def read_cities():
+    rows = []
+    with open(os.path.join(ROOT, "data", "cities.csv")) as f:
+        next(f)
+        for line in f:
+            parts = line.strip().split(",")
+            if len(parts) >= 5 and parts[0]:
+                rows.append(parts)
+    return rows
 
 
 def old_counts():
@@ -48,42 +105,35 @@ def old_counts():
     return counts
 
 
-def cities(regions):
+def cities(regions, rows):
     counts = old_counts()
     out = bytearray()
-    count = kept = 0
+    kept = 0
     per_region = [0] * len(regions)
-    with open(os.path.join(ROOT, "data", "cities.csv")) as f:
-        next(f)
-        for line in f:
-            parts = line.strip().split(",")
-            if len(parts) < 5 or not parts[0]:
-                continue
-            city, country = parts[0].strip().upper(), parts[1].strip().upper()
-            if len(city) > 16 or len(country) > 16:
-                raise SystemExit(f"Name longer than 16 characters: {city} / {country}")
-            lat, lon, rid = float(parts[2]), float(parts[3]), int(parts[4])
-            if not 1 <= rid <= len(regions):
-                raise SystemExit(f"{city} has an unknown region {rid}.")
-            r = regions[rid - 1]
-            dlon = round(lon * 100) - round(float(r["LON0"]) * 100)
-            if dlon < 0:
-                dlon += 36000
-            px = dlon // int(r["DX"])
-            py = (round(float(r["LAT0"]) * 100) - round(lat * 100)) // int(r["DY"])
-            if px >= 320 or py < 0 or py >= 160:
-                raise SystemExit(f"{city} is outside the {r['NAME']} map.")
-            per_region[rid - 1] += 1
-            key = city.ljust(16) + "," + country.ljust(16)
-            stats = counts.get(key, "000,000")
-            if stats != "000,000":
-                kept += 1
-            rec = (key + "," + coord(lat, 6) + "," + coord(lon, 7) + "," +
-                   str(rid) + "," + stats + "\r")
-            out += rec.encode("ascii")
-            count += 1
-    if count > 250:
-        raise SystemExit(f"data/cities.csv has {count} cities; the game holds at most 250.")
+    for parts in rows:
+        city, country = parts[0].strip().upper(), parts[1].strip().upper()
+        if len(city) > 16 or len(country) > 16:
+            raise SystemExit(f"Name longer than 16 characters: {city} / {country}")
+        lat, lon, rid = float(parts[2]), float(parts[3]), int(parts[4])
+        if not 1 <= rid <= len(regions):
+            raise SystemExit(f"{city} has an unknown region {rid}.")
+        r = regions[rid - 1]
+        dlon = round(lon * 100) - round(float(r["LON0"]) * 100)
+        if dlon < 0:
+            dlon += 36000
+        px = dlon // int(r["DX"])
+        py = (round(float(r["LAT0"]) * 100) - round(lat * 100)) // int(r["DY"])
+        if px >= 320 or py < 0 or py >= 160:
+            raise SystemExit(f"{city} is outside the {r['NAME']} map.")
+        per_region[rid - 1] += 1
+        key = city.ljust(16) + "," + country.ljust(16)
+        stats = counts.get(key, "000,000")
+        if stats != "000,000":
+            kept += 1
+        rec = key + "," + coord(lat, 6) + "," + coord(lon, 7) + "," + str(rid) + "," + stats + "\r"
+        out += rec.encode("ascii")
+    if len(rows) > 220:
+        raise SystemExit(f"data/cities.csv has {len(rows)} cities; the game holds at most 220.")
     for r, n in zip(regions, per_region):
         if n < 3:
             raise SystemExit(f"Region {r['NAME']} needs at least 3 cities, has {n}.")
@@ -93,51 +143,87 @@ def cities(regions):
         print(f"Kept the answer counts of {kept} cities from the old disk.")
 
 
+def map_bitmap(path):
+    img = Image.open(path).convert("RGB")
+    if img.size != (320, 160):
+        raise SystemExit(f"{path} must be 320x160 pixels.")
+    bitmap = bytearray(6400)
+    for y in range(160):
+        for x in range(320):
+            if sum(img.getpixel((x, y))) < 384:
+                bitmap[(y // 8) * 320 + (x // 8) * 8 + (y % 8)] |= 0x80 >> (x % 8)
+    return bitmap
+
+
 def maps(regions):
-    base = 0x7400
     header = bytearray([len(regions)])
     packed = bytearray()
-    start = base + 1 + 24 * len(regions)
+    start = MAPS_BASE + 1 + 24 * len(regions)
     for r in regions:
-        path = os.path.join(ROOT, "assets", "maps", f"region{r['ID']}.png")
-        img = Image.open(path).convert("RGB")
-        if img.size != (320, 160):
-            raise SystemExit(f"{path} must be 320x160 pixels.")
-        bitmap = bytearray(6400)
-        for y in range(160):
-            for x in range(320):
-                if sum(img.getpixel((x, y))) < 384:
-                    bitmap[(y // 8) * 320 + (x // 8) * 8 + (y % 8)] |= 0x80 >> (x % 8)
         address = start + len(packed)
-        i = 0
-        while i < 6400:
-            b = bitmap[i]
-            if b in (0, 255):
-                run = 1
-                while i + run < 6400 and run < 255 and bitmap[i + run] == b:
-                    run += 1
-                packed += bytes([b, run])
-                i += run
-            else:
-                packed.append(b)
-                i += 1
+        packed += rle(map_bitmap(os.path.join(ROOT, "assets", "maps", f"region{r['ID']}.png")))
         for word in (round(float(r["LON0"]) * 100), round(float(r["LAT0"]) * 100)):
             header += (word & 0xFFFF).to_bytes(2, "little")
         header += bytes([int(r["DX"]), int(r["DY"])])
         header += address.to_bytes(2, "little")
         header += r["NAME"].upper().ljust(16).encode("ascii")
     data = header + packed
-    if base + len(data) > 0xB000:
-        raise SystemExit(f"The maps take {len(data)} bytes: too big for $7400-$AFFF.")
-    write_prg("maps.prg", base, data)
+    if MAPS_BASE + len(data) > 0xAB00:
+        raise SystemExit(f"The maps take {len(data)} bytes: too big for $6C40-$AAFF.")
+    write_prg("maps.prg", MAPS_BASE, data)
     print(f"Maps: {len(data)} bytes for {len(regions)} regions.")
 
 
-def flags():
-    """data/flags.txt -> build/flags.prg (multicolour sprites, see prepare_data.ps1)."""
-    letters = "KWRCPGBYONLDMEAS"
-    lines = [l.strip() for l in open(os.path.join(ROOT, "data", "flags.txt"))
-             if l.strip() and not l.startswith("#")]
+def landmarks(rows):
+    path = os.path.join(ROOT, "data", "landmarks.txt")
+    lines = []
+    if os.path.exists(path):
+        lines = [l.rstrip("\n") for l in open(path) if l.strip() and not l.startswith("# ")]
+    if len(lines) % 23:
+        raise SystemExit("data/landmarks.txt: each picture is a name line, a colour letter and 21 rows of 24 characters.")
+    names = {p[0].strip().upper() for p in rows}
+    out = bytearray([len(lines) // 23])
+    for f in range(0, len(lines), 23):
+        name = lines[f].split("#")[0].strip().upper()
+        if name not in names:
+            raise SystemExit(f"Landmark city {name} is not in data/cities.csv.")
+        colour = LETTERS.find(lines[f + 1].strip().upper())
+        if colour < 0:
+            raise SystemExit(f"Landmark {name}: unknown colour letter {lines[f + 1]}.")
+        sprite = bytearray(64)
+        for y in range(21):
+            row = lines[f + 2 + y].strip()
+            if len(row) != 24:
+                raise SystemExit(f"Landmark {name}, row {y + 1}: needs 24 characters.")
+            for x, ch in enumerate(row):
+                if ch == "#":
+                    sprite[y * 3 + x // 8] |= 0x80 >> (x % 8)
+        out += name.ljust(16).encode("ascii") + bytes([colour, 0, 0, 0]) + sprite
+    if len(out) > 1024:
+        raise SystemExit("Too many landmarks for $AC00-$AFFF (12 at most).")
+    write_prg("landmarks.prg", 0xAC00, out)
+    print(f"Landmarks: {len(lines) // 23}.")
+
+
+def hiscores():
+    old = os.path.join(BUILD, "oldhiscores.prg")
+    if os.path.exists(old):
+        shutil.move(old, os.path.join(BUILD, "hiscores.prg"))
+        print("Kept the high scores from the old disk.")
+        return
+    names = ["MAGELLAN", "COLUMBUS", "MARCO POLO", "DA GAMA", "IBN BATTUTA",
+             "ZHENG HE", "AMUNDSEN", "COOK", "ERIKSSON", "TASMAN"]
+    out = bytearray()
+    for i, n in enumerate(names):
+        out += n[:10].ljust(10).encode("ascii") + bytes([30 - 3 * i, 0])
+    write_prg("hiscores.prg", 0xAB00, out)
+
+
+def flags(rows):
+    path = os.path.join(ROOT, "data", "flags.txt")
+    if not os.path.exists(path):
+        return                   # World Cities: the first hint is the country's name
+    lines = [l.strip() for l in open(path) if l.strip() and not l.startswith("#")]
     if len(lines) % 17:
         raise SystemExit("data/flags.txt: each flag is a name line and 16 rows of 12 letters.")
     out = bytearray([len(lines) // 17])
@@ -153,7 +239,7 @@ def flags():
             if len(row) != 12:
                 raise SystemExit(f"Flag {name}, row {y + 1}: needs 12 letters.")
             for x, ch in enumerate(row):
-                c = letters.find(ch)
+                c = LETTERS.find(ch)
                 if c < 0:
                     raise SystemExit(f"Flag {name}, row {y + 1}: unknown colour letter {ch}.")
                 if c == 0:
@@ -165,15 +251,11 @@ def flags():
                 sprite[y * 3 + x // 4] |= (colours.index(c) + 1) << (6 - 2 * (x % 4))
         colours += [0] * (3 - len(colours))
         out += name.ljust(16).encode("ascii") + bytes(colours) + b"\0" + sprite
-    with open(os.path.join(ROOT, "data", "cities.csv")) as f:
-        next(f)
-        for line in f:
-            parts = line.strip().split(",")
-            if len(parts) > 1 and parts[1].strip().upper() not in names:
-                raise SystemExit(f"No flag for {parts[1].strip()} in data/flags.txt.")
+    for p in rows:
+        if p[1].strip().upper() not in names:
+            raise SystemExit(f"No flag for {p[1].strip()} in data/flags.txt.")
     write_prg("flags.prg", 0xB000, out)
     print(f"Flags: {len(names)}.")
-
 
 
 PALETTE = [0x000000, 0xFFFFFF, 0x813338, 0x75CEC8, 0x8E3C97, 0x56AC4D, 0x2E2C9B, 0xEDF171,
@@ -187,7 +269,7 @@ def dist(p, i):
 
 
 def title():
-    """assets/title.png -> multicolour bitmap, like prepare_data.ps1."""
+    """assets/title.png -> multicolour bitmap, packed into title.prg."""
     path = os.path.join(ROOT, "assets", "title.png")
     if not os.path.exists(path):
         return
@@ -218,14 +300,21 @@ def title():
                     k = min(range(4), key=lambda k: dist(p, choices[k]))
                     byte |= k << (6 - 2 * col)
                 bitmap[cell * 8 + row] = byte
-    write_prg("titlescr.prg", 0xC000, screen + bytes(24) + colour + bytes([bg]))
-    write_prg("titlebmp.prg", 0xE000, bitmap)
+    colours = screen + bytes(24) + colour + bytes([bg]) + bytes(23)      # 2048 bytes
+    packed = packbits(colours) + packbits(bitmap)
+    if 0x6C40 + len(packed) > 0xAB00:
+        raise SystemExit("The packed title is too big.")
+    write_prg("title.prg", 0x6C40, packed)
+    print(f"Title: {len(packed)} bytes packed (from 10048).")
 
 
 if __name__ == "__main__":
     os.makedirs(BUILD, exist_ok=True)
     regions = load_regions()
-    cities(regions)
+    rows = read_cities()
+    cities(regions, rows)
     maps(regions)
-    flags()
+    landmarks(rows)
+    hiscores()
+    flags(rows)
     title()

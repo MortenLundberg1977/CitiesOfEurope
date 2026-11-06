@@ -40,7 +40,7 @@
 .label CITYBUF = $6000
 .label LINBUF = $C000          // field being edited
 .const RECLEN = 59
-.const RECMAX = 250            // same limit as the game
+.const RECMAX = 220            // same limit as the game
 .const NUMROWS = 20            // list rows on screen (rows 2..21)
 
 // ---------------- zero page ----------------

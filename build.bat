@@ -7,6 +7,10 @@ REM   run           start the game in VICE after building
 REM   run editor    start CITYEDIT in VICE instead
 REM Examples: build.bat run / build.bat pull run / build.bat run editor
 
+REM The game's name (program, disk and source file) and the disk's label.
+set "GAME=citiesofeurope"
+set "DISKNAME=europe"
+
 REM Remember this script's path now: shift also moves %0.
 set "SELF=%~f0"
 if /I not "%~1"=="pull" goto pull_done
@@ -38,7 +42,7 @@ if not exist build mkdir build
 if defined JAVA_HOME if exist "%JAVA_HOME%\bin\java.exe" set "JAVA_EXE=%JAVA_HOME%\bin\java.exe"
 if not defined JAVA_EXE set "JAVA_EXE=java"
 REM -odir is relative to the source file, so ..\build is this folder's build.
-"%JAVA_EXE%" -jar "%KICKASS_JAR%" "src\citiesofeurope.asm" -odir ..\build -symbolfile
+"%JAVA_EXE%" -jar "%KICKASS_JAR%" "src\%GAME%.asm" -odir ..\build -symbolfile
 if errorlevel 1 exit /b 1
 "%JAVA_EXE%" -jar "%KICKASS_JAR%" "src\cityedit.asm" -odir ..\build
 if errorlevel 1 exit /b 1
@@ -50,35 +54,35 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM The game saves each city's right/wrong answer counts in CITIES on the disk.
-REM Copy that file off the old disk so prepare_data.ps1 can carry the counts over.
+REM The game saves each city's right/wrong answer counts in CITIES and the top-10
+REM table in HISCORES on the disk. Copy them off the old disk so prepare_data.ps1
+REM can carry them over.
 if exist "build\oldcities.prg" del "build\oldcities.prg"
-if exist "build\citiesofeurope.d64" "%C1541_EXE%" "build\citiesofeurope.d64" -read cities "build\oldcities.prg" >nul 2>nul
+if exist "build\oldhiscores.prg" del "build\oldhiscores.prg"
+if exist "build\%GAME%.d64" "%C1541_EXE%" "build\%GAME%.d64" -read cities "build\oldcities.prg" -read hiscores "build\oldhiscores.prg" >nul 2>nul
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "prepare_data.ps1"
 if errorlevel 1 exit /b 1
 
-REM The disk is made fresh each time from data\cities.csv, data\regions.csv and the
-REM maps in assets\maps (with the answer counts from the old disk).
+REM The disk is made fresh each time from data\, assets\ and the old disk's scores.
 REM Disk filenames must be lowercase: c1541 stores uppercase ASCII as shifted
 REM PETSCII, which the programs' LOAD calls ("CITIES", "MAPS") never match.
-if exist "build\citiesofeurope.d64" del "build\citiesofeurope.d64"
-if exist "build\citiesofeurope.d64" (
-    echo build\citiesofeurope.d64 is in use. Close VICE and build again.
+if exist "build\%GAME%.d64" del "build\%GAME%.d64"
+if exist "build\%GAME%.d64" (
+    echo build\%GAME%.d64 is in use. Close VICE and build again.
     exit /b 1
 )
-"%C1541_EXE%" -format "europe,64" d64 "build\citiesofeurope.d64" -write "build\citiesofeurope.prg" citiesofeurope -write "build\cityedit.prg" cityedit -write "build\cities.prg" cities -write "build\maps.prg" maps -write "build\flags.prg" flags
+"%C1541_EXE%" -format "%DISKNAME%,64" d64 "build\%GAME%.d64" -write "build\%GAME%.prg" %GAME% -write "build\highcode.prg" highcode -write "build\title.prg" title -write "build\hiscores.prg" hiscores -write "build\maps.prg" maps -write "build\landmarks.prg" landmarks -write "build\cities.prg" cities -write "build\cityedit.prg" cityedit
 if errorlevel 1 exit /b 1
-REM The title picture is optional: without assets\title.png the game shows a text title.
-if exist "assets\title.png" (
-    "%C1541_EXE%" "build\citiesofeurope.d64" -write "build\titlescr.prg" titlescr -write "build\titlebmp.prg" titlebmp
+if exist "build\flags.prg" (
+    "%C1541_EXE%" "build\%GAME%.d64" -write "build\flags.prg" flags
     if errorlevel 1 exit /b 1
 )
 
-echo Built build\citiesofeurope.prg and build\citiesofeurope.d64
+echo Built build\%GAME%.prg and build\%GAME%.d64
 if /I not "%~1"=="run" goto :eof
 if /I "%~2"=="editor" (
-    x64sc -8 "build\citiesofeurope.d64" -autostart "build\cityedit.prg"
+    x64sc -8 "build\%GAME%.d64" -autostart "build\cityedit.prg"
 ) else (
-    x64sc -8 "build\citiesofeurope.d64" -autostart "build\citiesofeurope.prg"
+    x64sc -8 "build\%GAME%.d64" -autostart "build\%GAME%.prg"
 )

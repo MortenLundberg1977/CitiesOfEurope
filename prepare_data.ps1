@@ -93,7 +93,7 @@ foreach ($line in $lines) {
     [void]$records.Append($record)
     $count++
 }
-if ($count -gt 250) { throw "data\cities.csv has $count cities; the game holds at most 250." }
+if ($count -gt 220) { throw "data\cities.csv has $count cities; the game holds at most 220." }
 foreach ($region in $regions) {
     $n = @($lines | Where-Object { $_.Trim().Split(",")[4] -eq $region.ID }).Count
     if ($n -lt 3) { throw "Region $($region.NAME) needs at least 3 cities, has $n." }
@@ -104,12 +104,55 @@ if ($kept) { Write-Output "Kept the answer counts of $kept cities from the old d
 
 # MAPS: every region map as a hi-res bitmap (40x20 cells of 8 bytes, bit 7 = leftmost
 # pixel, set = land), packed with a simple RLE: $00 and $FF are followed by a run
-# length (1-255), other bytes are literal. Loads to $7400:
+# length (1-255), other bytes are literal. Loads to $6C40:
 #   count (1), then per region: LON0, LAT0 (signed words, hundredths of a degree),
 #   DX, DY (bytes), address of its packed map (word), name (16 chars)
 #   then the packed maps
 Add-Type -AssemblyName System.Drawing
-$mapsBase = 0x7400
+
+# The RLE packing the game unpacks: $00 and $FF are followed by a run length
+# (1-255), other bytes are literal.
+function Add-RLE($list, [byte[]]$data) {
+    $i = 0
+    while ($i -lt $data.Length) {
+        $b = $data[$i]
+        if ($b -eq 0 -or $b -eq 255) {
+            $run = 1
+            while ($i + $run -lt $data.Length -and $run -lt 255 -and $data[$i + $run] -eq $b) { $run++ }
+            $list.Add($b); $list.Add([byte]$run)
+            $i += $run
+        } else {
+            $list.Add($b)
+            $i++
+        }
+    }
+}
+
+# PackBits, for the title picture: a control byte 0-127 is followed by that many
+# + 1 literal bytes; 128-255 by one byte repeated (control - 128 + 3) times.
+function Add-PackBits($list, [byte[]]$data) {
+    $i = 0; $n = $data.Length
+    while ($i -lt $n) {
+        $run = 1
+        while ($i + $run -lt $n -and $run -lt 130 -and $data[$i + $run] -eq $data[$i]) { $run++ }
+        if ($run -ge 3) {
+            $list.Add([byte](128 + $run - 3)); $list.Add($data[$i]); $i += $run
+        } else {
+            $j = $i
+            while ($j -lt $n -and ($j - $i) -lt 128) {
+                $r = 1
+                while ($j + $r -lt $n -and $r -lt 3 -and $data[$j + $r] -eq $data[$j]) { $r++ }
+                if ($r -ge 3) { break }
+                $j++
+            }
+            $list.Add([byte]($j - $i - 1))
+            for ($k = $i; $k -lt $j; $k++) { $list.Add($data[$k]) }
+            $i = $j
+        }
+    }
+}
+
+$mapsBase = 0x6C40
 $header = New-Object System.Collections.Generic.List[byte]
 $packed = New-Object System.Collections.Generic.List[byte]
 $header.Add([byte]$regions.Count)
@@ -131,19 +174,7 @@ foreach ($region in $regions) {
     }
     $image.Dispose()
     $address = $dataStart + $packed.Count
-    $i = 0
-    while ($i -lt 6400) {
-        $b = $bitmap[$i]
-        if ($b -eq 0 -or $b -eq 255) {
-            $run = 1
-            while ($i + $run -lt 6400 -and $run -lt 255 -and $bitmap[$i + $run] -eq $b) { $run++ }
-            $packed.Add($b); $packed.Add([byte]$run)
-            $i += $run
-        } else {
-            $packed.Add($b)
-            $i++
-        }
-    }
+    Add-RLE $packed $bitmap
     foreach ($word in @(([Math]::Round([double]::Parse($region.LON0, $culture) * 100)), ([Math]::Round([double]::Parse($region.LAT0, $culture) * 100)))) {
         $header.Add([byte]($word -band 0xff)); $header.Add([byte](($word -shr 8) -band 0xff))
     }
@@ -152,17 +183,71 @@ foreach ($region in $regions) {
     $header.AddRange([System.Text.Encoding]::ASCII.GetBytes($region.NAME.ToUpperInvariant().PadRight(16)))
 }
 $maps = $header.ToArray() + $packed.ToArray()
-$flagsBase = 0xB000
-if ($mapsBase + $maps.Length -gt $flagsBase) { throw "The maps take $($maps.Length) bytes: too big for `$7400-`$AFFF." }
+if ($mapsBase + $maps.Length -gt 0xAB00) { throw "The maps take $($maps.Length) bytes: too big for `$6C40-`$AAFF." }
 Write-Prg "maps.prg" $mapsBase $maps
 Write-Output "Maps: $($maps.Length) bytes for $($regions.Count) regions."
+
+# LANDMARKS: data\landmarks.txt, pictures shown next to the marker when the
+# answer is revealed. Loads to $AC00: count (1), then per picture 84 bytes:
+#   city name (16), colour, spare (3), sprite (64: hi-res, 3 bytes per row)
+$letters = "KWRCPGBYONLDMEAS"     # C64 colours 0-15
+$landBytes = New-Object System.Collections.Generic.List[byte]
+$landPath = Join-Path $projectRoot "data\landmarks.txt"
+$landLines = @()
+if (Test-Path $landPath) {
+    $landLines = @(Get-Content $landPath | Where-Object { $_.Trim() -ne "" -and -not $_.StartsWith("# ") })
+}
+if ($landLines.Count % 23 -ne 0) { throw "data\landmarks.txt: each picture is a name line, a colour letter and 21 rows of 24 characters." }
+$landBytes.Add([byte]($landLines.Count / 23))
+$cityNames = @{}
+foreach ($line in $lines) { $p = $line.Trim().Split(","); if ($p.Length -ge 2) { $cityNames[$p[0].Trim().ToUpperInvariant()] = $true } }
+for ($f = 0; $f -lt $landLines.Count; $f += 23) {
+    $name = ($landLines[$f] -replace '#.*$', '').Trim().ToUpperInvariant()
+    if ($name.Length -gt 16) { throw "Landmark city '$name' is longer than 16 characters." }
+    if (-not $cityNames.ContainsKey($name)) { throw "Landmark city '$name' is not in data\cities.csv." }
+    $colour = $letters.IndexOf($landLines[$f + 1].Trim().ToUpperInvariant())
+    if ($colour -lt 0) { throw "Landmark $name`: unknown colour letter '$($landLines[$f + 1])'." }
+    $sprite = New-Object byte[] 64
+    for ($y = 0; $y -lt 21; $y++) {
+        $row = $landLines[$f + 2 + $y].Trim()
+        if ($row.Length -ne 24) { throw "Landmark $name, row $($y + 1): needs 24 characters." }
+        for ($x = 0; $x -lt 24; $x++) {
+            if ($row[$x] -eq '#') { $sprite[$y * 3 + [Math]::Floor($x / 8)] = $sprite[$y * 3 + [Math]::Floor($x / 8)] -bor (0x80 -shr ($x % 8)) }
+        }
+    }
+    $landBytes.AddRange([System.Text.Encoding]::ASCII.GetBytes($name.PadRight(16)))
+    $landBytes.Add([byte]$colour); $landBytes.Add(0); $landBytes.Add(0); $landBytes.Add(0)
+    $landBytes.AddRange($sprite)
+}
+if ($landBytes.Count -gt 1024) { throw "Too many landmarks for `$AC00-`$AFFF (12 at most)." }
+Write-Prg "landmarks.prg" 0xAC00 $landBytes.ToArray()
+Write-Output "Landmarks: $($landLines.Count / 23)."
+
+# HISCORES: the top-10 table, loads to $AB00: per entry name (10), points, spare.
+# build.bat copies the table off the old disk to build\oldhiscores.prg first.
+$oldHs = Join-Path $buildDirectory "oldhiscores.prg"
+if (Test-Path $oldHs) {
+    Move-Item $oldHs (Join-Path $buildDirectory "hiscores.prg") -Force
+    Write-Output "Kept the high scores from the old disk."
+} else {
+    $hs = New-Object System.Collections.Generic.List[byte]
+    $names = @("MAGELLAN", "COLUMBUS", "MARCO POLO", "DA GAMA", "IBN BATTUTA", "ZHENG HE", "AMUNDSEN", "COOK", "ERIKSSON", "TASMAN")
+    for ($i = 0; $i -lt 10; $i++) {
+        $hs.AddRange([System.Text.Encoding]::ASCII.GetBytes($names[$i].Substring(0, [Math]::Min(10, $names[$i].Length)).PadRight(10)))
+        $hs.Add([byte](30 - 3 * $i)); $hs.Add(0)
+    }
+    Write-Prg "hiscores.prg" 0xAB00 $hs.ToArray()
+}
 
 # FLAGS: data\flags.txt, one 12x16 grid of colour letters per country, as
 # multicolour sprites. Loads to $B000: count (1), then per flag 84 bytes:
 #   country name (16), colour for bits 01 ($D025), 10 (sprite colour), 11 ($D026),
 #   spare (1), sprite (64: 3 bytes per row, 16 rows used)
-$letters = "KWRCPGBYONLDMEAS"     # C64 colours 0-15
-$flagLines = @(Get-Content (Join-Path $projectRoot "data\flags.txt") | Where-Object { $_.Trim() -ne "" -and -not $_.StartsWith("#") })
+# World Cities has no flags (its first hint is the country's name).
+$flagsBase = 0xB000
+$flagsPath = Join-Path $projectRoot "data\flags.txt"
+if (Test-Path $flagsPath) {
+$flagLines = @(Get-Content $flagsPath | Where-Object { $_.Trim() -ne "" -and -not $_.StartsWith("#") })
 if ($flagLines.Count % 17 -ne 0) { throw "data\flags.txt: each flag is a name line and 16 rows of 12 letters." }
 $flagBytes = New-Object System.Collections.Generic.List[byte]
 $flagBytes.Add([byte]($flagLines.Count / 17))
@@ -204,6 +289,7 @@ foreach ($line in $lines) {
 if ($flagsBase + $flagBytes.Count -gt 0xC000) { throw "Too many flags for `$B000-`$BFFF." }
 Write-Prg "flags.prg" $flagsBase $flagBytes.ToArray()
 Write-Output "Flags: $($flagNames.Count)."
+}
 
 # TITLE: assets\title.png, any size, scaled to fit 320x200 and converted to a
 # multicolour bitmap (160x200, double-wide pixels). Each 4x8 cell gets black
@@ -289,4 +375,22 @@ if ((Test-Path $titlePath) -and -not $titleFresh) {
     $scr[2024] = [byte]$background
     Write-Prg "titlescr.prg" 0xC000 $scr
     Write-Prg "titlebmp.prg" 0xE000 $tbitmap
+}
+
+# TITLE: both parts packed (PackBits) into one file, which loads faster. It loads to $6C40
+# (before the maps load there) and the game unpacks it: 2048 bytes to $C000
+# (the colours, padded), then 8000 bytes to $E000 (the bitmap).
+if (Test-Path $titlePath) {
+    $scrPart = [System.IO.File]::ReadAllBytes((Join-Path $buildDirectory "titlescr.prg"))
+    $bmpPart = [System.IO.File]::ReadAllBytes((Join-Path $buildDirectory "titlebmp.prg"))
+    $plain = New-Object byte[] (2048 + 8000)
+    [System.Array]::Copy($scrPart, 2, $plain, 0, $scrPart.Length - 2)
+    [System.Array]::Copy($bmpPart, 2, $plain, 2048, 8000)
+    $titlePacked = New-Object System.Collections.Generic.List[byte]
+    # the two parts separately: the game switches destination between them
+    Add-PackBits $titlePacked $plain[0..2047]
+    Add-PackBits $titlePacked $plain[2048..10047]
+    if (0x6C40 + $titlePacked.Count -gt 0xAB00) { throw "The packed title is too big." }
+    Write-Prg "title.prg" 0x6C40 $titlePacked.ToArray()
+    Write-Output "Title: $($titlePacked.Count) bytes packed (from 10048)."
 }

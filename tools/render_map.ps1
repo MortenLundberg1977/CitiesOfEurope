@@ -9,7 +9,11 @@
 # Projection, the same one src/citiesofeurope.asm (calc_pixel) uses to place the marker:
 #   x = (lon - LON0) / DX     longitude wraps, so a region may cross 180 degrees
 #   y = (LAT0 - lat) / DY     DX and DY are hundredths of a degree per pixel
-param([Parameter(Mandatory = $true)][string]$GeoJson)
+#
+# Optional: -Borders ne_50m_admin_0_boundary_lines_land.geojson (dotted lines) and
+# -Rivers ne_50m_rivers_lake_centerlines.geojson (solid lines; only rivers with a
+# scalerank up to -RiverRank, so the maps don't get crowded).
+param([Parameter(Mandatory = $true)][string]$GeoJson, [string]$Borders, [string]$Rivers, [int]$RiverRank = 5)
 
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
@@ -30,6 +34,24 @@ foreach ($feature in $data.features) {
     if ($geometry.type -eq "Polygon") { $polygons.Add($geometry.coordinates) }
     elseif ($geometry.type -eq "MultiPolygon") { foreach ($p in $geometry.coordinates) { $polygons.Add($p) } }
 }
+
+$lines = New-Object System.Collections.Generic.List[object]
+function Add-Lines([string]$path, [bool]$dotted, [int]$maxRank) {
+    if (-not $path) { return }
+    Write-Output "Reading $path"
+    foreach ($feature in (Get-Content -Raw $path | ConvertFrom-Json).features) {
+        if ($maxRank -ge 0 -and $feature.properties.scalerank -gt $maxRank) { continue }
+        if ($feature.properties.featurecla -and $feature.properties.featurecla -notmatch 'River|Boundary|International|Disputed|Line') { continue }
+        $geometry = $feature.geometry
+        if (-not $geometry) { continue }
+        $parts = New-Object System.Collections.Generic.List[object]
+        if ($geometry.type -eq "LineString") { $parts.Add($geometry.coordinates) }
+        elseif ($geometry.type -eq "MultiLineString") { foreach ($p in $geometry.coordinates) { $parts.Add($p) } }
+        foreach ($p in $parts) { $lines.Add([pscustomobject]@{ Points = $p; Dotted = $dotted }) }
+    }
+}
+Add-Lines $Borders $true -1
+Add-Lines $Rivers $false $RiverRank
 
 foreach ($region in (Import-Csv (Join-Path $root "data\regions.csv"))) {
     $lon0 = [double]$region.LON0
@@ -98,6 +120,28 @@ foreach ($region in (Import-Csv (Join-Path $root "data\regions.csv"))) {
     }
     foreach ($d in $dots) {
         if ($d[0] -ge 0 -and $d[0] -lt $width -and $d[1] -ge 0 -and $d[1] -lt $height) { $land[$d[0], $d[1]] = $true }
+    }
+    # Rivers (solid) and country borders (dotted) in sea colour on the land.
+    # The hi-res map has only two colours per 8x8 block, so they can't be a third colour.
+    foreach ($line in $lines) {
+        foreach ($shift in @(-360.0, 0.0, 360.0)) {
+            $step = 0
+            for ($i = 1; $i -lt $line.Points.Count; $i++) {
+                $x0 = ($line.Points[$i - 1][0] + $shift - $lon0) / $dx; $y0 = ($lat0 - $line.Points[$i - 1][1]) / $dy
+                $x1 = ($line.Points[$i][0] + $shift - $lon0) / $dx; $y1 = ($lat0 - $line.Points[$i][1]) / $dy
+                if ([Math]::Max($x0, $x1) -lt 0 -or [Math]::Min($x0, $x1) -ge $width -or [Math]::Max($y0, $y1) -lt 0 -or [Math]::Min($y0, $y1) -ge $height) { continue }
+                $n = [int][Math]::Ceiling([Math]::Max([Math]::Abs($x1 - $x0), [Math]::Abs($y1 - $y0)))
+                if ($n -lt 1) { $n = 1 }
+                for ($k = 0; $k -le $n; $k++) {
+                    $px = [int][Math]::Floor($x0 + ($x1 - $x0) * $k / $n); $py = [int][Math]::Floor($y0 + ($y1 - $y0) * $k / $n)
+                    if ($px -lt 0 -or $px -ge $width -or $py -lt 0 -or $py -ge $height) { continue }
+                    $step++
+                    if ($line.Dotted -and ($step % 3) -ne 0) { continue }
+                    # keep a pixel of land on both sides, so lines don't eat small countries
+                    if ($land[$px, $py]) { $land[$px, $py] = $false }
+                }
+            }
+        }
     }
     for ($y = 0; $y -lt $height; $y++) {
         for ($x = 0; $x -lt $width; $x++) {
