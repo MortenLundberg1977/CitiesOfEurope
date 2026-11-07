@@ -4,9 +4,10 @@
 // title tune) and is imported first by the main source file.
 //
 // Files on disk (device 8), made by build.bat / tools/build.sh:
-//   TITLE     - the title picture, RLE-packed, loaded to $6C40 and unpacked to
-//               $C000 (colours) and $E000 (bitmap)
-//   HIGHCODE  - the second part of this program, loaded to $C800
+//   TITLE     - the title picture, packed, loaded to $6C40 and unpacked to
+//               $D000 (colours, in the RAM under the I/O chips) and $E000
+//               (bitmap, in the RAM under the KERNAL ROM)
+//   HIGHCODE  - the second part of this program, loaded to $C400
 //   HISCORES  - the top-10 table, loaded to $AB00, saved after a new entry
 //   MAPS      - region table and RLE-packed region maps, loaded to $6C40
 //   FLAGS     - flag sprites (Cities of Europe), loaded to $B000
@@ -63,8 +64,11 @@
 .label VARS2 = $AB80           // more variables
 .label LANDMARKS = $AC00       // landmark table
 .label FLAGS = $B000           // flag table
-.label TITLESCR = $C000        // title colours: screen, colour RAM (+$400), background (+$7E8)
-.label HIGHCODE = $C800        // second part of the program
+.label TITLESCR = $C000        // title screen (bitmap colours), copied from TITLECOL
+.label TITLECOL = $D000        // title colours: screen, colour RAM (+$400), background
+                               // (+$7E8), in the RAM under the I/O chips
+.label TITLETMP = BITMAP       // colour RAM part on its way to $D800 (no map shown then)
+.label HIGHCODE = $C400        // second part of the program (after the title screen)
 .label TITLEBMP = $E000        // title bitmap, in the RAM under the KERNAL ROM
 .const FLAGLEN = 84            // flag / landmark table entry
 .const RECLEN = 59             // 58 chars + CR
@@ -72,6 +76,7 @@
 .const REGLEN = 24             // region table entry
 .const ROUNDS = 10             // cities per game
 .const MAPROWS = 20            // map occupies screen rows 0..19
+.const MENUROW = 5             // game menu: first line
 .const MAPCOLOUR = $D6         // hi-res cell colours: light green land on blue sea
 .const SPLITLINE = 206         // raster IRQ line just above the text rows
 .const LASTMAPLINE = 210       // last raster line of the map (row 19, pixel line 7)
@@ -167,6 +172,11 @@
 .label sfxtime = $378          // frames left of the current note (0 = silent)
 .label sfxpos = $379           // offset of the next note in sfx_tbl
 .label sfxwave = $37A          // waveform of the effect
+.label joysel = $37B           // the line the ">" points at (0-2)
+.label selbase = $37C          // which list: 0 the three answers, 1 the game menu
+.label joylast = $37D          // joystick bits pressed at the last poll
+.label joytime = $37E          // jiffy when a held direction repeats
+.label dir2 = $37F             // map game: a second direction (diagonal)
 // more variables at $AB80
 .label rights = VARS2+0        // right answers this game
 .label hintlvl = VARS2+1       // hints used this round (0-2)
@@ -405,7 +415,7 @@ show_answer:
         lda #$20
         jsr CHROUT
         jsr print_country
-        say(0, 24, "PRESS SPACE")
+        say(0, 24, "PRESS SPACE OR FIRE")
         lda players             // two players: say whose turn is next
         cmp #2
         bne sa_wait
@@ -488,7 +498,7 @@ go_draw:
         .text "A DRAW!"
         .byte 0
 go_wait:
-        say(0, 24, "PRESS SPACE")
+        say(0, 24, "PRESS SPACE OR FIRE")
         jsr wait_continue
         // a high-score entry for each player who made the table
         lda #0
@@ -575,14 +585,19 @@ player_colour:
 // game_menu: which game, and how many players
 // --------------------------------------------------------------
 game_menu:
+        lda #0
+        sta joysel
+gm_draw:
         lda #$93
         jsr CHROUT
-        say(12, 3, "CHOOSE A GAME")
-        say(5, 7, "1  NAME THE MARKED CITY")
-        say(6, 8, "(PICK FROM THREE, H FOR HINTS)")
-        say(5, 11, "2  FIND THE CITY ON THE MAP")
-        say(6, 12, "(POINT AT IT: CLOSER SCORES MORE)")
-        say(5, 16, "P  PLAYERS: ")
+        say(13, 2, "CHOOSE A GAME")
+        say(5, MENUROW, "1  NAME THE MARKED CITY")
+        say(6, MENUROW+1, "(PICK FROM THREE, H FOR HINTS)")
+        say(5, MENUROW+3, "2  FIND THE CITY ON THE MAP")
+        say(6, MENUROW+4, "(POINT AT IT: CLOSER SCORES MORE)")
+        say(3, 17, "JOYSTICK IN PORT 2: UP, DOWN, FIRE")
+        say(3, 18, "GAME 1: LEFT OR RIGHT FOR A HINT")
+        say(5, MENUROW+6, "P  PLAYERS: ")
         lda players
         clc
         adc #$30
@@ -590,19 +605,35 @@ game_menu:
         lda players
         cmp #2
         bne gm_key
-        say(6, 17, "(TAKING TURNS, 10 CITIES EACH)")
+        say(6, MENUROW+7, "(TAKING TURNS, 10 CITIES EACH)")
 gm_key:
+        lda #1                  // the ">" in front of the chosen line
+        sta selbase
+        jsr sel_marks
+gm_in:
         jsr poll_input
+        beq gm_in
+        cmp #$0D                // fire or Return: the line with the ">"
+        bne gm_keys
+        lda joysel
+        beq gm_one
+        cmp #1
+        beq gm_two
+        bne gm_players
+gm_keys:
         cmp #$31                // "1"
         beq gm_one
         cmp #$32                // "2"
         beq gm_two
         cmp #$50                // "P"
-        bne gm_key
+        beq gm_players
+        jsr sel_move            // up and down
+        jmp gm_in
+gm_players:
         lda players
         eor #3                  // 1 <-> 2
         sta players
-        jmp game_menu
+        jmp gm_draw
 gm_one:
         lda #0
         sta mode
@@ -646,10 +677,109 @@ pi_end:
         rts
 
 // --------------------------------------------------------------
-// input: the keyboard. poll_input: A = a key, or 0 if none
+// input: the keyboard and a joystick in port 2. poll_input: A = a key, or 0
+// if none. The joystick acts as keys: fire is Return, the directions are
+// the cursor keys (repeating when held).
 // --------------------------------------------------------------
 poll_input:
-        jmp GETIN
+        jsr GETIN
+        bne pj_done
+        lda $DC00               // port 2: bits 0-4 up, down, left, right, fire; 0 = pressed
+        eor #$FF
+        and #$1F
+        tax
+        eor joylast
+        stx joylast
+        and joylast             // just pressed
+        bne pj_new
+        txa                     // held: a direction repeats
+        and #$0F
+        beq pj_done
+        tay
+        lda $A2                 // the jiffy clock
+        sec
+        sbc joytime
+        bmi pj_none
+        tya
+        ldy #5                  // then every 5 jiffies
+        bne pj_rep
+pj_new:
+        cmp #$10
+        bcc pj_dirs
+        lda #$0D                // fire
+        rts
+pj_dirs:
+        ldy #25                 // repeat after 25 jiffies
+pj_rep:
+        pha
+        tya
+        clc
+        adc $A2
+        sta joytime
+        pla
+        ldx #$FF
+pj_bit:
+        inx
+        lsr
+        bcc pj_bit
+        lda joy_keys,x
+pj_done:
+        rts
+pj_none:
+        lda #0
+        rts
+joy_keys:
+        .byte $91, $11, $9D, $1D  // cursor up, down, left, right
+
+// sel_move: A = a key. Up and down move the ">" (joysel 0-2) in the list
+// selbase and redraw it; other keys do nothing.
+sel_move:
+        cmp #$91
+        bne smv_down
+        lda joysel
+        beq sel_marks
+        dec joysel
+        jmp sel_marks
+smv_down:
+        cmp #$11
+        bne smv_done
+        lda joysel
+        cmp #2
+        beq sel_marks
+        inc joysel
+// sel_marks: ">" in front of line joysel of the list selbase, spaces at the others
+sel_marks:
+        ldx selbase
+        lda sel_lo,x
+        sta ptr
+        lda sel_hi,x
+        sta ptr+1
+        lda sel_step,x
+        sta tmpd
+        ldx #0
+        ldy #0
+sm_line:
+        lda #$20
+        cpx joysel
+        bne sm_put
+        lda #$3E                // ">"
+sm_put:
+        sta (ptr),y
+        tya
+        clc
+        adc tmpd
+        tay
+        inx
+        cpx #3
+        bne sm_line
+smv_done:
+        rts
+sel_lo:
+        .byte <(SCREEN+21*40), <(SCREEN+MENUROW*40+3)
+sel_hi:
+        .byte >(SCREEN+21*40), >(SCREEN+MENUROW*40+3)
+sel_step:
+        .byte 40, 120           // the answers are on rows 21-23, the menu lines 3 rows apart
 
 // wait_continue: until Space or Return
 wait_continue:
@@ -662,7 +792,9 @@ wc_done:
         rts
 
 // --------------------------------------------------------------
-// get_answer: keys 1-3; H for a hint. Shows the seconds. Returns A = option 0..2.
+// get_answer: keys 1-3, or the ">" moved with up/down and Return (or the
+// joystick and fire); H (or left/right) for a hint. Shows the seconds.
+// Returns A = option 0..2.
 // --------------------------------------------------------------
 get_answer:
         lda #0
@@ -676,6 +808,10 @@ get_answer:
         sta subsec
         cli
         jsr show_hintline
+        lda #0
+        sta joysel
+        sta selbase
+        jsr sel_marks
 ga_loop:
         lda secs
         cmp lastsecs
@@ -685,21 +821,33 @@ ga_loop:
 ga_input:
         jsr poll_input
         beq ga_loop
+        cmp #$0D                // Return or fire: the line with the ">"
+        bne ga_digit
+        lda joysel
+        jmp ga_pick
+ga_digit:
         cmp #$31                // "1".."3"
         bcc ga_other
         cmp #$34
         bcs ga_other
         sec
         sbc #$31
+ga_pick:
         cmp removed
         beq ga_loop
         rts
 ga_other:
-        cmp #$48                // "H": hint
-        bne ga_notH
-        jsr give_hint
+        cmp #$48                // "H", left or right: a hint
+        beq ga_hint
+        cmp #$9D
+        beq ga_hint
+        cmp #$1D
+        beq ga_hint
+        jsr sel_move            // up and down
         jmp ga_loop
-ga_notH:
+ga_hint:
+        jsr give_hint
+        jsr sel_marks           // (the 50/50 blanks a line)
         jmp ga_loop
 
 // first hint: the flag (or the country name); second: remove a wrong option
@@ -2386,7 +2534,7 @@ d_skip:
 // --------------------------------------------------------------
 // title picture (multicolour bitmap in VIC bank 3)
 // --------------------------------------------------------------
-// load_title: TITLE (packed) to TITLEPACK, unpacked to $C000 and $E000;
+// load_title: TITLE (packed) to TITLEPACK, unpacked to TITLECOL and TITLEBMP;
 // titleok = 1 if it worked. Without it the game shows a text title.
 load_title:
         lda #0
@@ -2399,14 +2547,17 @@ load_title:
         sta upsrc
         lda #>TITLEPACK
         sta upsrc+1
-        lda #<TITLESCR
+        lda #<TITLECOL
         sta updst
-        lda #>TITLESCR
+        lda #>TITLECOL
         sta updst+1
-        lda #<(TITLESCR+$800)
+        lda #<(TITLECOL+$800)
         sta upendlo
-        lda #>(TITLESCR+$800)
+        lda #>(TITLECOL+$800)
         sta upendhi
+        sei                     // the colours go under the I/O chips and the bitmap
+        lda #$34                // under the KERNAL ROM: the unpacker reads back what
+        sta $01                 // it wrote, so everything is RAM for a moment
         jsr unpack_lz           // colours
         lda #<TITLEBMP
         sta updst
@@ -2416,9 +2567,6 @@ load_title:
         sta upendlo
         lda #>(TITLEBMP+8000)
         sta upendhi
-        sei                     // the bitmap is under the KERNAL ROM: the unpacker
-        lda #$35                // reads back what it wrote, so the ROM goes off
-        sta $01
         jsr unpack_lz
         lda #$36
         sta $01
@@ -2430,22 +2578,47 @@ lt_done:
 
 // title_on: show the picture
 title_on:
+        sei                     // TITLECOL is under the I/O chips: all RAM for a moment
+        lda #$34
+        sta $01
         ldx #0
+to_cp:
+        lda TITLECOL,x          // the screen part to TITLESCR
+        sta TITLESCR,x
+        lda TITLECOL+$100,x
+        sta TITLESCR+$100,x
+        lda TITLECOL+$200,x
+        sta TITLESCR+$200,x
+        lda TITLECOL+$300,x
+        sta TITLESCR+$300,x
+        lda TITLECOL+$400,x      // the colour RAM part and the background to TITLETMP
+        sta TITLETMP,x
+        lda TITLECOL+$500,x
+        sta TITLETMP+$100,x
+        lda TITLECOL+$600,x
+        sta TITLETMP+$200,x
+        lda TITLECOL+$700,x
+        sta TITLETMP+$300,x
+        inx
+        bne to_cp
+        lda #$36
+        sta $01
+        cli
 to_col:
-        lda TITLESCR+$400,x
+        lda TITLETMP,x
         sta $D800,x
-        lda TITLESCR+$500,x
+        lda TITLETMP+$100,x
         sta $D900,x
-        lda TITLESCR+$600,x
+        lda TITLETMP+$200,x
         sta $DA00,x
-        lda TITLESCR+$6E8,x     // last 256 of the 1000 bytes
+        lda TITLETMP+$2E8,x      // last 256 of the 1000 bytes
         sta $DAE8,x
         inx
         bne to_col
         lda #0
         sta $D020
         sta $D015
-        lda TITLESCR+$7E8
+        lda TITLETMP+$3E8
         sta $D021
         lda $DD00
         and #%11111100          // VIC bank 3: $C000-$FFFF
@@ -2592,8 +2765,8 @@ pt2_none:
 
 // --------------------------------------------------------------
 // find_on_map: the other game. The city's name is shown; the player moves
-// a cross over the map with the cursor keys (or W A S D) and presses
-// Return or Space. Points by the distance in km: under 50: 5, 150: 4,
+// a cross over the map with the joystick, the cursor keys or W A S D and
+// presses fire, Return or Space. Points by the distance in km: under 50: 5, 150: 4,
 // 300: 3, 600: 2, 1000: 1. Three or more count as a right answer.
 // --------------------------------------------------------------
 find_on_map:
@@ -2620,13 +2793,13 @@ find_on_map:
         jsr print_country
         lda #$3F                // "?"
         jsr CHROUT
-        say(0, 23, "MOVE: CURSOR KEYS OR W A S D")
+        say(0, 23, "MOVE: JOYSTICK, CURSOR KEYS, WASD")
         ldx #0
         ldy #24
         jsr gotoxy
         jsr player_tag
         jsr print_inline
-        .text "RETURN OR SPACE: HERE"
+        .text "FIRE, RETURN OR SPACE: HERE"
         .byte 0
 .if (FLAG_HINT == 1) {
         jsr show_flag
@@ -2680,6 +2853,7 @@ fm_h:
 fm_step:
         stx tmpd
         pla
+fm_apply:
         cmp #1
         bne fm_n1
         lda crossy              // up
@@ -2730,9 +2904,15 @@ fm_right:
         lda #<319
         sta crossxlo
 fm_moved:
+        lda dir2                // a diagonal: the other direction too
+        beq fm_shown
+        ldx #0
+        stx dir2
+        jmp fm_apply
+fm_shown:
         jsr cross_pos
 fm_key:
-        jsr GETIN
+        jsr poll_input          // Return, Space or fire
         cmp #$0D
         beq fm_done
         cmp #$20
@@ -2783,9 +2963,34 @@ km_lo:
 km_hi:
         .byte >50, >150, >300, >600, >1000
 
-// fm_dir: the direction key held now (the KERNAL's key matrix code in $CB,
-// shift in $028D): A = 0 none, 1 up, 2 down, 3 left, 4 right
+// fm_dir: the direction held now: the joystick in port 2, or a key (the
+// KERNAL's key matrix code in $CB, shift in $028D). A = 0 none, 1 up,
+// 2 down, 3 left, 4 right; a diagonal puts left or right in dir2.
 fm_dir:
+        lda #0
+        sta dir2
+        lda $DC00
+        and #$0F
+        eor #$0F                // pressed: 1 up, 2 down, 4 left, 8 right
+        beq fd_keys
+        tax
+        and #$0C
+        beq fd_vert
+        lsr
+        lsr
+        clc
+        adc #2                  // 3 left, 4 right
+        sta dir2
+fd_vert:
+        txa
+        and #3                  // 1 up, 2 down
+        bne fd_joy
+        ldy dir2                // only left or right
+        sta dir2
+        tya
+fd_joy:
+        rts
+fd_keys:
         lda $CB
         cmp #9                  // W
         beq fd_up
@@ -2821,6 +3026,13 @@ fd_left:
 fd_none:
         lda #0
         rts
+
+.assert "The main program must end below the bitmap at $2000", * <= BITMAP, true
+
+// ==============================================================
+// Second part: loaded from HIGHCODE to $C400
+// ==============================================================
+.segment HighCode [start=HIGHCODE, max=$CFFF, outPrg="highcode.prg"]
 
 // cross_pos: the cross sprite (3) at crossx/crossy; its centre is 5 pixels in
 cross_pos:
@@ -3029,12 +3241,6 @@ cross_shape:
         .byte $04,$00,$00
         .fill 30, 0
 
-.assert "The main program must end below the bitmap at $2000", * <= BITMAP, true
-
-// ==============================================================
-// Second part: loaded from HIGHCODE to $C800
-// ==============================================================
-.segment HighCode [start=HIGHCODE, max=$CFFF, outPrg="highcode.prg"]
 
 // --------------------------------------------------------------
 // title_loop: the title picture and the high-score table take turns
@@ -3103,7 +3309,9 @@ w8_in:
         beq w8_yes
         cmp #$53                // "S"
         beq w8_yes
-        jmp w8_loop
+        cmp #$11                // joystick down: the stats too
+        bne w8_loop
+        lda #$53
 w8_yes:
         sec
         rts
@@ -3163,7 +3371,7 @@ hs_name:
         lda tmpx
         cmp #10
         bne hs_row
-        ldx #8
+        ldx #5
         ldy #24
         jsr gotoxy
         lda #<msg_hskeys
@@ -3225,6 +3433,8 @@ enter_hiscore:
         lda #>msg_entername
         sta ptr+1
         jsr print_str
+        say(2, 15, "JOYSTICK: UP AND DOWN CHANGE A LETTER,")
+        say(2, 16, "RIGHT: NEXT, LEFT: BACK, FIRE: DONE")
         lda #0
         sta namelen
         ldx #HSNAME-1
@@ -3242,7 +3452,17 @@ eh_shown:
         lda NAMEIN,x
         cpx namelen
         bne eh_ch
+        cmp #$20
+        bne eh_rvs
         lda #$A4                // the cursor: an underscore block
+        bne eh_ch
+eh_rvs:
+        pha                     // a letter being chosen: reversed
+        lda #$12
+        jsr CHROUT
+        pla
+        jsr CHROUT
+        lda #$92
 eh_ch:
         jsr CHROUT
         inx
@@ -3253,28 +3473,81 @@ eh_ch:
 eh_key:
         jsr poll_input
         beq eh_key
-        cmp #$0D                // Return: done
-        beq eh_done
-        cmp #$14                // Delete
-        bne eh_add
+        cmp #$0D                // Return or fire: done
+        bne eh_notdone
+        jmp eh_done
+eh_notdone:
         ldx namelen
-        beq eh_key
+        cmp #$91                // up and down: the letter at the cursor
+        beq eh_up
+        cmp #$11
+        beq eh_down
+        cmp #$1D                // right: the next letter
+        bne eh_left
+        cpx #HSNAME
+        bcs eh_key
+        inc namelen
+        jmp eh_show
+eh_left:
+        cmp #$9D                // left or Delete: back one
+        beq eh_del
+        cmp #$14
+        bne eh_add
+eh_del:
+        cpx #HSNAME
+        bcs eh_back
+        lda #$20                // the letter being chosen goes
+        sta NAMEIN,x
+eh_back:
+        txa
+        beq eh_show
         dex
         stx namelen
         lda #$20
         sta NAMEIN,x
         jmp eh_show
-eh_add:
-        cmp #$20
-        bcc eh_key
-        cmp #$5B                // space, digits, signs and A-Z
-        bcs eh_key
-        ldx namelen
+eh_up:
         cpx #HSNAME
         bcs eh_key
+        lda NAMEIN,x            // space, A..Z, space
+        cmp #$5A
+        beq eh_space
+        cmp #$41
+        bcs eh_inc
+        lda #$40
+eh_inc:
+        clc
+        adc #1
+        bne eh_set
+eh_down:
+        cpx #HSNAME
+        bcs eh_key
+        lda NAMEIN,x            // space, Z..A, space
+        cmp #$41
+        beq eh_space
+        bcs eh_dec
+        lda #$5B
+eh_dec:
+        sec
+        sbc #1
+        bne eh_set
+eh_space:
+        lda #$20
+eh_set:
+        sta NAMEIN,x
+        jmp eh_show
+eh_add:
+        cmp #$20
+        bcc eh_ign
+        cmp #$5B                // space, digits, signs and A-Z
+        bcs eh_ign
+        cpx #HSNAME
+        bcs eh_ign
         sta NAMEIN,x
         inc namelen
         jmp eh_show
+eh_ign:
+        jmp eh_key
 eh_done:
         // move entries hspos..8 down one place
         lda hspos
@@ -3677,7 +3950,7 @@ msg_hstitle:
         .text "HIGH SCORES"
         .byte 0
 msg_hskeys:
-        .text "SPACE=PLAY  S=YOUR STATS"
+        .text "SPACE OR FIRE: PLAY   S: STATS"
         .byte 0
 msg_entername:
         .text "NEW HIGH SCORE! TYPE YOUR NAME:"

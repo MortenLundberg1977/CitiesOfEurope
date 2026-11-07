@@ -18,7 +18,7 @@
         .byte $0D
         .text "HINTS AND QUICK ANSWERS SCORE MORE."
         .byte $0D, $0D
-        .text "PRESS SPACE TO START, S FOR STATS"
+        .text "SPACE OR FIRE TO START, S FOR STATS"
         .byte 0
 }
 

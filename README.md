@@ -28,6 +28,15 @@ while the rest of the disk loads (about two minutes on a real 1541; use warp
 in VICE to skip the wait). Then the title and the high-score table take
 turns. Press **Space** to play, or **S** to see your stats.
 
+**Joystick**: everything also works with a joystick in **port 2** (for
+example a wireless Atari CX40+). Fire does what Space and Return do: it
+starts the game and goes on after each answer; down on the title screen shows
+the stats. In the game menu and in game 1, up and down move the **>** pointer
+and fire picks; left or right asks for a hint. In game 2 the joystick moves
+the cross (diagonals too) and fire puts it down. For a high-score name, up and
+down change the letter, right goes to the next one, left goes back, and fire
+finishes.
+
 Then choose a game with **1** or **2**, and press **P** first for two
 players. The maps show one part of Europe at a time (British Isles, Iberia,
 France & Benelux, Central Europe, Italy & Balkans, Nordic & Baltic, Eastern
@@ -44,9 +53,9 @@ choices come from the same part of Europe.
   count at the bottom of the screen.
 
 **2: Find the city on the map.** The city and its country are named (and its
-flag shown); move the white cross to where you think it is with the **cursor
-keys** or **W A S D** (hold a key to move faster) and press **Return** or
-**Space**. The game shows where the city really is and how far off you were,
+flag shown); move the white cross to where you think it is with the **joystick**,
+the **cursor keys** or **W A S D** (hold to move faster) and press **fire**,
+**Return** or **Space**. The game shows where the city really is and how far off you were,
 in km. **Points** by distance: under 50 km 5, under 150 km 4, under 300 km 3,
 under 600 km 2, under 1000 km 1. Three or more points count as a right answer.
 
@@ -153,8 +162,12 @@ please check these and note anything odd:
    clean (no flickering or garbage line), and the ring marker flashes.
 3. **The map game**: the cross moves smoothly with the cursor keys (with Shift
    for left and up) and with W A S D, faster when a key is held.
-4. **Sound**: the chime and the buzz after an answer, and the title music.
-5. **Saving**: after a game it says "SAVING..." and no "COULD NOT SAVE TO
+4. **Joystick** (port 2): fire starts the game from the title; the **>**
+   pointer moves in the menu and the answers; the cross moves, also
+   diagonally; a high-score name can be entered with it. Also check that the
+   keyboard still types right while the joystick is plugged in.
+5. **Sound**: the chime and the buzz after an answer, and the title music.
+6. **Saving**: after a game it says "SAVING..." and no "COULD NOT SAVE TO
    DISK". Then switch off, load again, and press **S**: the stats should still
    show the answers from before. A new high score should still be in the table.
 
@@ -243,7 +256,7 @@ unpacked, which the game also reads; the answer counts stay in `SCORES`.
   one or two players, region maps (a bitmap with a raster split to text for
   the bottom five rows), marker, cross, flag and landmark sprites, hints,
   points, timer, answer counts, sounds; and in a second part (`HIGHCODE`, at
-  `$C800`) the title loop, high scores, stats and the music player. It is the
+  `$C400`) the title loop, high scores, stats, the music player and the distance in km. It is the
   same file in World Cities and Cities of Europe.
 - `src/config.asm` — what differs between the two: the hint (flag or country
   name), the text title and the title tune

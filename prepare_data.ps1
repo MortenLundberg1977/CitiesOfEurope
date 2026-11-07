@@ -449,8 +449,9 @@ if ((Test-Path $titlePath) -and -not $titleFresh) {
 }
 
 # TITLE: both parts packed (LZ, each on its own) into one file, which loads faster. It loads to $6C40
-# (before the maps load there) and the game unpacks it: 2048 bytes to $C000
-# (the colours, padded), then 8000 bytes to $E000 (the bitmap).
+# (before the maps load there) and the game unpacks it: 2048 bytes to $D000, the RAM under
+# the I/O chips (the colours, padded; copied to $C000 and colour RAM when the picture shows),
+# then 8000 bytes to $E000 (the bitmap).
 if (Test-Path $titlePath) {
     $scrPart = [System.IO.File]::ReadAllBytes((Join-Path $buildDirectory "titlescr.prg"))
     $bmpPart = [System.IO.File]::ReadAllBytes((Join-Path $buildDirectory "titlebmp.prg"))
