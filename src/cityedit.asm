@@ -39,6 +39,7 @@
 // ---------------- memory ----------------
 .label CITYBUF = $6000
 .label LINBUF = $C000          // field being edited
+.label CEDLOAD = $9400         // CITIES loads here, then goes to CITYBUF (BASIC ROM is off)
 .const RECLEN = 59
 .const RECMAX = 220            // same limit as the game
 .const NUMROWS = 20            // list rows on screen (rows 2..21)
@@ -49,6 +50,10 @@
 .label srco = $FD              // copy source / SAVE start pointer
 .label srch = $FE
 .label ptr = $02
+.label zsrc = $04              // unpack pointers ($04-$09 belong to BASIC, which is off)
+.label zdst = $06
+.label zback = $08
+.label zend = $351             // 2 bytes
 
 // ---------------- variables ----------------
 .label numrec = $33E
@@ -69,6 +74,8 @@
 BasicUpstart2(main)
 
 main:
+        lda #$36                // BASIC ROM off: RAM up to $BFFF
+        sta $01
         lda #0
         sta $D020
         sta $D021
@@ -115,12 +122,136 @@ load_cities:
         ldy #0                  // SA=0: load to the X/Y address
         jsr SETLFS
         lda #0
-        ldx #<CITYBUF
-        ldy #>CITYBUF
+        ldx #<CEDLOAD
+        ldy #>CEDLOAD
         jsr LOAD
-        bcs lc_fresh
+        bcc lc_loaded
+        jmp lc_fresh
+lc_loaded:
         jsr close_ch
+        // the build packs CITIES (first byte 1, length, LZ data); this
+        // editor saves it plain. Either way it ends up at CITYBUF.
+        lda #<CITYBUF
+        sta zdst
+        lda #>CITYBUF
+        sta zdst+1
+        lda CEDLOAD
+        cmp #1
+        bne lc_plain
+        lda #<(CEDLOAD+3)
+        sta zsrc
+        lda #>(CEDLOAD+3)
+        sta zsrc+1
+        clc
+        lda CEDLOAD+1
+        adc #<CITYBUF
+        sta zend
+        lda CEDLOAD+2
+        adc #>CITYBUF
+        sta zend+1
+        jsr unpack_lz
         jmp lc_count
+lc_plain:
+        lda #<CEDLOAD
+        sta zsrc
+        lda #>CEDLOAD
+        sta zsrc+1
+        ldy #0
+lc_copy:
+        lda (zsrc),y
+        sta (zdst),y
+        jsr z_src1
+        jsr z_dst1
+        lda zsrc+1
+        cmp $AF                 // the end address LOAD left
+        bcc lc_copy
+        lda zsrc
+        cmp $AE
+        bcc lc_copy
+        jmp lc_count
+
+// unpack_lz: LZ data at zsrc to zdst until zdst reaches zend (as in game.asm).
+unpack_lz:
+        ldy #0
+        lda (zsrc),y
+        jsr z_src1
+        tax
+        bmi lz_match
+        inx
+lz_lit:
+        lda (zsrc),y
+        sta (zdst),y
+        jsr z_src1
+        jsr z_dst1
+        dex
+        bne lz_lit
+        jmp lz_end
+lz_match:
+        cpx #$FE
+        bcs lz_run
+        txa
+        and #$7F
+        clc
+        adc #4
+        tax
+        sec
+        lda zdst
+        sbc (zsrc),y
+        sta zback
+        jsr z_src1
+        lda zdst+1
+        sbc (zsrc),y
+        sta zback+1
+        jsr z_src1
+lz_copy:
+        lda (zback),y
+        sta (zdst),y
+        inc zback
+        bne lz_c2
+        inc zback+1
+lz_c2:
+        jsr z_dst1
+        dex
+        bne lz_copy
+        jmp lz_end
+lz_run:                         // $FE: a run of $00, $FF: a run of $FF; then the length
+        txa
+        and #1
+        beq lz_r0
+        lda #$FF
+lz_r0:
+        pha
+        lda (zsrc),y
+        jsr z_src1
+        tax
+        pla
+lz_fill:
+        sta (zdst),y
+        jsr z_dst1
+        dex
+        bne lz_fill
+lz_end:
+        lda zdst+1
+        cmp zend+1
+        bcc unpack_lz
+        bne lz_done
+        lda zdst
+        cmp zend
+        bcc unpack_lz
+lz_done:
+        rts
+z_src1:
+        inc zsrc
+        bne z_s
+        inc zsrc+1
+z_s:
+        rts
+z_dst1:
+        inc zdst
+        bne z_d
+        inc zdst+1
+z_d:
+        rts
 lc_fresh:
         jsr close_ch
         lda #0

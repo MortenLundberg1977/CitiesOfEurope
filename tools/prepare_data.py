@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Python port of prepare_data.ps1 (see there for the file layouts): builds
-build/cities.prg, maps.prg, landmarks.prg, hiscores.prg, flags.prg (if
+build/cities.prg, scores.prg, maps.prg, landmarks.prg, hiscores.prg, flags.prg (if
 data/flags.txt exists) and title.prg (if assets/title.png exists).
 Usage: python3 tools/prepare_data.py   (run from anywhere; needs Pillow)
 """
@@ -27,46 +27,87 @@ def coord(value, width):
     return text.rjust(width)
 
 
-def rle(data):
-    """$00 and $FF are followed by a run length (1-255), other bytes are literal."""
-    out, i = bytearray(), 0
-    while i < len(data):
-        b = data[i]
-        if b in (0, 255):
-            run = 1
-            while i + run < len(data) and run < 255 and data[i + run] == b:
-                run += 1
-            out += bytes([b, run])
-            i += run
-        else:
-            out.append(b)
-            i += 1
-    return out
+def lz_pack(d):
+    """The LZ packing the game unpacks (see prepare_data.ps1): 0-127 literal
+    (control + 1 bytes), 128-253 copy (control - 124 bytes) from an offset back
+    (2 bytes, low first), 254/255 a run of $00/$FF with the length next (0 = 256)."""
+    d = bytes(d)
+    n = len(d)
+    out, lit = bytearray(), bytearray()
+    head, prev = {}, [-1] * n
 
+    def flush():
+        k = 0
+        while k < len(lit):
+            c = min(128, len(lit) - k)
+            out.append(c - 1)
+            out.extend(lit[k:k + c])
+            k += c
+        lit.clear()
 
-def packbits(data):
-    """0-127: that many + 1 literal bytes follow; 128-255: one byte, repeated control - 125 times."""
-    out, i, n = bytearray(), 0, len(data)
+    def insert(pos):
+        if pos + 4 <= n:
+            h = d[pos:pos + 4]
+            prev[pos] = head.get(h, -1)
+            head[h] = pos
+
+    i = 0
     while i < n:
-        run = 1
-        while i + run < n and run < 130 and data[i + run] == data[i]:
-            run += 1
-        if run >= 3:
-            out += bytes([128 + run - 3, data[i]])
+        run = 0
+        if d[i] in (0, 255):
+            while i + run < n and run < 256 and d[i + run] == d[i]:
+                run += 1
+        best_len = best_off = 0
+        if i + 4 <= n:
+            cand, tries = head.get(d[i:i + 4], -1), 0
+            while cand >= 0 and tries < 128 and i - cand <= 65535:
+                mx, l = min(129, n - i), 0
+                while l < mx and d[cand + l] == d[i + l]:
+                    l += 1
+                if l > best_len:
+                    best_len, best_off = l, i - cand
+                    if l == mx:
+                        break
+                cand = prev[cand]
+                tries += 1
+        if run >= 2 and run + 1 >= best_len:
+            flush()
+            out += bytes([0xFE if d[i] == 0 else 0xFF, run & 255])
+            for k in range(run):
+                insert(i + k)
             i += run
+        elif best_len >= 4:
+            flush()
+            out += bytes([0x80 | (best_len - 4), best_off & 255, best_off >> 8])
+            for k in range(best_len):
+                insert(i + k)
+            i += best_len
         else:
-            j = i
-            while j < n and j - i < 128:
-                r = 1
-                while j + r < n and r < 3 and data[j + r] == data[j]:
-                    r += 1
-                if r >= 3:
-                    break
-                j += 1
-            out.append(j - i - 1)
-            out += data[i:j]
-            i = j
+            lit.append(d[i])
+            insert(i)
+            i += 1
+    flush()
     return out
+
+
+def lz_unpack(p, start, out_len):
+    o, s = bytearray(), start
+    while len(o) < out_len:
+        c = p[s]
+        s += 1
+        if c < 128:
+            o += p[s:s + c + 1]
+            s += c + 1
+        elif c >= 254:
+            ln = p[s] or 256
+            s += 1
+            o += bytes([0 if c == 254 else 255]) * ln
+        else:
+            ln, off = (c & 127) + 4, p[s] | (p[s + 1] << 8)
+            s += 2
+            for _ in range(ln):
+                o.append(o[-off])
+    return o
 
 
 def load_regions():
@@ -92,22 +133,38 @@ def read_cities():
 
 
 def old_counts():
-    """Answer counts from build/oldcities.prg (CITIES copied off the old disk)."""
+    """Answer counts from the old disk: CITIES (packed or plain) for the names,
+    SCORES (if there) for the counts, matched by position."""
     path = os.path.join(BUILD, "oldcities.prg")
+    spath = os.path.join(BUILD, "oldscores.prg")
     counts = {}
     if os.path.exists(path):
         old = open(path, "rb").read()
-        o = 2
-        while o + 59 <= len(old) and old[o] != 0 and old[o + 58] == 13:
-            counts[old[o:o + 33].decode("ascii")] = old[o + 51:o + 58].decode("ascii")
+        if len(old) > 5 and old[2] == 1:
+            plain = lz_unpack(old, 5, old[3] | (old[4] << 8))
+        else:
+            plain = old[2:]
+        keys, o = [], 0
+        while o + 59 <= len(plain) and plain[o] != 0 and plain[o + 58] == 13:
+            key = bytes(plain[o:o + 33]).decode("ascii")
+            keys.append(key)
+            counts[key] = bytes(plain[o + 51:o + 58]).decode("ascii")
             o += 59
+        if os.path.exists(spath):
+            sc = open(spath, "rb").read()
+            if len(sc) >= 3 + 6 * len(keys) and sc[2] == len(keys):
+                for k, key in enumerate(keys):
+                    dg = sc[3 + 6 * k:9 + 6 * k].decode("ascii")
+                    counts[key] = dg[:3] + "," + dg[3:]
         os.remove(path)
+    if os.path.exists(spath):
+        os.remove(spath)
     return counts
 
 
 def cities(regions, rows):
     counts = old_counts()
-    out = bytearray()
+    out, digits = bytearray(), bytearray()
     kept = 0
     per_region = [0] * len(regions)
     for parts in rows:
@@ -132,13 +189,17 @@ def cities(regions, rows):
             kept += 1
         rec = key + "," + coord(lat, 6) + "," + coord(lon, 7) + "," + str(rid) + "," + stats + "\r"
         out += rec.encode("ascii")
+        digits += (stats[:3] + stats[4:]).encode("ascii")
     if len(rows) > 220:
         raise SystemExit(f"data/cities.csv has {len(rows)} cities; the game holds at most 220.")
     for r, n in zip(regions, per_region):
         if n < 3:
             raise SystemExit(f"Region {r['NAME']} needs at least 3 cities, has {n}.")
     out.append(0)
-    write_prg("cities.prg", 0x3900, out)
+    packed = lz_pack(out)
+    write_prg("cities.prg", 0x6C40, bytes([1, len(out) & 255, len(out) >> 8]) + packed)
+    write_prg("scores.prg", 0x2000, bytes([len(rows)]) + digits)
+    print(f"Cities: {len(rows)}, {len(packed) + 3} bytes packed (from {len(out)}).")
     if kept:
         print(f"Kept the answer counts of {kept} cities from the old disk.")
 
@@ -161,7 +222,7 @@ def maps(regions):
     start = MAPS_BASE + 1 + 24 * len(regions)
     for r in regions:
         address = start + len(packed)
-        packed += rle(map_bitmap(os.path.join(ROOT, "assets", "maps", f"region{r['ID']}.png")))
+        packed += lz_pack(map_bitmap(os.path.join(ROOT, "assets", "maps", f"region{r['ID']}.png")))
         for word in (round(float(r["LON0"]) * 100), round(float(r["LAT0"]) * 100)):
             header += (word & 0xFFFF).to_bytes(2, "little")
         header += bytes([int(r["DX"]), int(r["DY"])])
@@ -301,7 +362,7 @@ def title():
                     byte |= k << (6 - 2 * col)
                 bitmap[cell * 8 + row] = byte
     colours = screen + bytes(24) + colour + bytes([bg]) + bytes(23)      # 2048 bytes
-    packed = packbits(colours) + packbits(bitmap)
+    packed = lz_pack(colours) + lz_pack(bitmap)
     if 0x6C40 + len(packed) > 0xAB00:
         raise SystemExit("The packed title is too big.")
     write_prg("title.prg", 0x6C40, packed)

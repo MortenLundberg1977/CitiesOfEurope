@@ -45,16 +45,20 @@
 .label OPEN = $FFC0
 .label CHKIN = $FFC6
 .label CHRIN = $FFCF
+.label CHKOUT = $FFC9
 
 // ---------------- memory ----------------
 .label LANDSPR = $0200         // landmark sprite (block 8: the BASIC input buffer)
 .label FLAGSPR = $02C0         // flag sprite (block 11, free RAM)
 .label SPRITE = $0380          // marker sprite (block 14)
+.label CROSSSPR = $03C0        // map game cross-hair sprite (block 15)
 .label SCREEN = $0400          // map colours (rows 0-19) and text (rows 20-24)
 .label BITMAP = $2000          // map bitmap (6400 bytes used)
 .label CITYBUF = $3900         // city data buffer (up to $6C2C)
 .label MAPS = $6C40            // region table + packed maps (up to $AAFF)
 .label TITLEPACK = $6C40       // the packed title, before the maps load over it
+.label CITYLOAD = $6C40        // CITIES loads here too, and is unpacked to CITYBUF
+.label SCORESBUF = $2000       // SCORES loads into the (not yet used) bitmap
 .label HISCORES = $AB00        // 10 entries: name (10), points, spare (BASIC ROM is off)
 .label VARS2 = $AB80           // more variables
 .label LANDMARKS = $AC00       // landmark table
@@ -97,8 +101,9 @@
 .const F_FLAGS = 4
 .const F_LANDMARKS = 5
 .const F_CITIES = 6
-.const F_SAVECITIES = 7
+.const F_SCORES = 7
 .const F_SAVEHISCORES = 8
+.const F_SAVESCORES = 9
 
 // ---------------- zero page ----------------
 .label ptr = $02               // temp pointer
@@ -146,7 +151,6 @@
 .label tmpx = $35D
 .label idxtmp = $35E
 .label count = $35F
-.label tbl = $360              // ROUNDS bytes
 .label ctrow = $36A
 .label gxcol = $36B
 .label titleok = $36C          // 1 when the title picture is in memory
@@ -163,7 +167,6 @@
 .label sfxtime = $378          // frames left of the current note (0 = silent)
 .label sfxpos = $379           // offset of the next note in sfx_tbl
 .label sfxwave = $37A          // waveform of the effect
-.label NAMEBUF = $03C0         // 16 bytes: name being looked up
 // more variables at $AB80
 .label rights = VARS2+0        // right answers this game
 .label hintlvl = VARS2+1       // hints used this round (0-2)
@@ -205,6 +208,38 @@
 .label totwlo = VARS2+41
 .label totwhi = VARS2+42
 .label NAMEIN = VARS2+48       // 10 bytes: the name being typed
+.label NAMEBUF = VARS2+64      // 16 bytes: name being looked up
+.label tbl = VARS2+80          // 20 bytes: the cities of the game
+.label mode = VARS2+100        // 0: name the marked city, 1: find it on the map
+.label players = VARS2+101     // 1 or 2
+.label curplayer = VARS2+102   // 0 or 1
+.label pscore = VARS2+103      // 2 bytes: points of each player
+.label prights = VARS2+105     // 2 bytes: right answers of each player
+.label nrounds = VARS2+107     // 10 or 20
+.label crossxlo = VARS2+108    // cross-hair pixel on the map
+.label crossxhi = VARS2+109
+.label crossy = VARS2+110
+.label holdcnt = VARS2+111     // frames a direction key has been held
+.label lastframe = VARS2+112
+.label m16lo = VARS2+113       // mul16x8: 16-bit factor
+.label m16hi = VARS2+114
+.label r24 = VARS2+115         // 3 bytes: mul16x8 result
+.label distlo = VARS2+118      // map game: distance
+.label disthi = VARS2+119
+.label alo = VARS2+120
+.label ahi = VARS2+121
+.label blo = VARS2+122
+.label bhi = VARS2+123
+
+// say: print a text at a column and row
+.macro say(col, row, str) {
+        ldx #col
+        ldy #row
+        jsr gotoxy
+        jsr print_inline
+        .text str
+        .byte 0
+}
 
 BasicUpstart2(main)
 
@@ -224,19 +259,21 @@ main:
         lda loaded
         cmp #1
         beq show_start
-        // first time: the title picture first, shown while the rest loads
-        lda #<msg_loading
-        sta ptr
-        lda #>msg_loading
-        sta ptr+1
-        jsr print_str
+        // first time: the title picture first, then music while the rest loads
+        lda #1
+        sta players
+        lda #0
+        sta mode
+        say(0, 0, "LOADING...")
         jsr load_title
         lda titleok
         beq ld_data
         jsr title_on
 ld_data:
         ldx #F_HIGHCODE
-        jsr load_named          // HIGHCODE
+        jsr load_named
+        jsr music_on
+        jsr load_cities         // CITIES and SCORES (before MAPS: it unpacks from there)
         ldx #F_HISCORES
         jsr load_named
         ldx #F_MAPS
@@ -247,7 +284,6 @@ ld_data:
 }
         ldx #F_LANDMARKS
         jsr load_named
-        jsr load_cities
         lda #1
         sta loaded
 
@@ -265,15 +301,39 @@ show_start:
         bcs enough_cities
         jmp err_few
 enough_cities:
+        jsr game_menu           // mode and number of players
 
         jsr map_mode
         lda #0
-        sta score
-        sta rights
         sta round
+        sta pscore
+        sta pscore+1
+        sta prights
+        sta prights+1
+        lda #ROUNDS             // 10 rounds a player, taking turns
+        ldx players
+        cpx #2
+        bne gs_one
+        asl
+gs_one:
+        sta nrounds
         jsr pick_ten
 
 roundloop:
+        lda players             // whose turn: the border shows it
+        cmp #2
+        bne rl_one
+        lda round
+        and #1
+        tax
+        stx curplayer
+        lda player_colour,x
+        sta $D020
+        jmp rl_go
+rl_one:
+        lda #0
+        sta curplayer
+rl_go:
         jsr hide_marker
         jsr clear_text
         ldx round
@@ -288,6 +348,12 @@ roundloop:
         jsr get_recptr_ans
         jsr parse_coords
         jsr calc_pixel
+        lda mode
+        beq name_round
+        jsr find_on_map         // the other mode: point at the map
+        jmp show_answer
+
+name_round:
         jsr show_marker
         jsr choose_options
         jsr print_question
@@ -296,31 +362,13 @@ roundloop:
         beq was_correct
 
         // ----- wrong answer -----
-        ldx #sfx_wrong-sfx_tbl
-        lda #$20                // sawtooth
-        jsr play_sfx
-        jsr get_recptr_ans
-        ldy #F_WRONG+2
-        jsr count_up
-        jsr clear_text
-        ldx #0
-        ldy #20
-        jsr gotoxy
-        lda #<msg_wrong
-        sta ptr
-        lda #>msg_wrong
-        sta ptr+1
-        jsr print_str
+        lda #0
+        sta gained
+        jsr answer_wrong
+        say(0, 20, "NO, IT IS:")
         jmp show_answer
 
 was_correct:
-        inc rights
-        ldx #sfx_right-sfx_tbl
-        lda #$10                // triangle
-        jsr play_sfx
-        jsr get_recptr_ans
-        ldy #F_RIGHT+2
-        jsr count_up
         // points: 3, 2 or 1 by hints, plus 2 or 1 for speed
         lda #3
         sec
@@ -334,26 +382,12 @@ was_correct:
         bcs wc_slow
         inc gained
 wc_slow:
-        lda score
-        clc
-        adc gained
-        sta score
-        jsr clear_text
-        ldx #0
-        ldy #20
-        jsr gotoxy
-        lda #<msg_correct
-        sta ptr
-        lda #>msg_correct
-        sta ptr+1
-        jsr print_str
-        lda gained
-        jsr print_dec8
-        lda #<msg_points
-        sta ptr
-        lda #>msg_points
-        sta ptr+1
-        jsr print_str
+        jsr answer_right
+        say(0, 20, "CORRECT! +")
+        jsr print_gained
+        jsr print_inline
+        .text ". IT IS:"
+        .byte 0
 
 show_answer:
 .if (FLAG_HINT == 1) {
@@ -371,93 +405,212 @@ show_answer:
         lda #$20
         jsr CHROUT
         jsr print_country
-        ldx #0
-        ldy #24
-        jsr gotoxy
-        lda #<msg_next
-        sta ptr
-        lda #>msg_next
-        sta ptr+1
-        jsr print_str
+        say(0, 24, "PRESS SPACE")
+        lda players             // two players: say whose turn is next
+        cmp #2
+        bne sa_wait
+        ldx round
+        inx
+        cpx nrounds
+        beq sa_wait
+        jsr print_inline
+        .text ": PLAYER "
+        .byte 0
+        lda curplayer
+        eor #1
+        clc
+        adc #$31
+        jsr CHROUT
+sa_wait:
         jsr wait_continue
 
         inc round
         lda round
-        cmp #ROUNDS
+        cmp nrounds
         beq game_over
         jmp roundloop
 
 game_over:
         jsr hide_marker
-        jsr save_cities         // the right/wrong counts
-        jsr check_hiscore       // hspos = place in the table, $FF if none
+        jsr save_scores         // the right/wrong counts
+        lda #0
+        sta $D020
         jsr clear_text
         lda saveok
         bne go_saved
+        say(0, 23, "COULD NOT SAVE TO DISK")
+go_saved:
+        say(0, 20, "GAME OVER")
+        lda players
+        cmp #2
+        beq go_two
+        lda pscore
+        sta score
+        jsr check_hiscore
+        say(0, 21, "YOU SCORED ")
+        ldx #0
+        jsr print_result
+        lda hspos
+        bpl go_newhs
+        jmp go_wait
+go_newhs:
+        say(0, 22, "A NEW HIGH SCORE!")
+        jmp go_wait
+go_two:
+        say(0, 21, "PLAYER 1: ")
+        ldx #0
+        jsr print_result
+        say(0, 22, "PLAYER 2: ")
+        ldx #1
+        jsr print_result
         ldx #0
         ldy #23
         jsr gotoxy
-        lda #<msg_nosave
-        sta ptr
-        lda #>msg_nosave
-        sta ptr+1
-        jsr print_str
-go_saved:
-        ldx #0
-        ldy #20
-        jsr gotoxy
-        lda #<msg_over
-        sta ptr
-        lda #>msg_over
-        sta ptr+1
-        jsr print_str
-        ldx #0
-        ldy #21
-        jsr gotoxy
-        lda #<msg_score
-        sta ptr
-        lda #>msg_score
-        sta ptr+1
-        jsr print_str
-        lda score
-        jsr print_dec8
-        lda #<msg_points2
-        sta ptr
-        lda #>msg_points2
-        sta ptr+1
-        jsr print_str
-        lda rights
-        jsr print_dec8
-        lda #<msg_ofright
-        sta ptr
-        lda #>msg_ofright
-        sta ptr+1
-        jsr print_str
-        lda hspos
-        bmi go_nohs
-        ldx #0
-        ldy #22
-        jsr gotoxy
-        lda #<msg_newhs
-        sta ptr
-        lda #>msg_newhs
-        sta ptr+1
-        jsr print_str
-go_nohs:
-        ldx #0
-        ldy #24
-        jsr gotoxy
-        lda #<msg_again
-        sta ptr
-        lda #>msg_again
-        sta ptr+1
-        jsr print_str
+        lda pscore
+        cmp pscore+1
+        beq go_draw
+        lda #$31                // "1"
+        bcs go_win
+        lda #$32
+go_win:
+        pha
+        jsr print_inline
+        .text "PLAYER "
+        .byte 0
+        pla
+        jsr CHROUT
+        jsr print_inline
+        .text " WINS!"
+        .byte 0
+        jmp go_wait
+go_draw:
+        jsr print_inline
+        .text "A DRAW!"
+        .byte 0
+go_wait:
+        say(0, 24, "PRESS SPACE")
         jsr wait_continue
+        // a high-score entry for each player who made the table
+        lda #0
+        sta curplayer
+go_hs:
+        ldx curplayer
+        lda pscore,x
+        sta score
+        jsr check_hiscore
         lda hspos
-        bmi go_main
+        bmi go_next
         jsr enter_hiscore       // name, table, save
-go_main:
+go_next:
+        inc curplayer
+        lda curplayer
+        cmp players
+        bne go_hs
         jmp main
+
+// print_result: player X's points and right answers: "34 POINTS, 8 RIGHT"
+print_result:
+        stx tmpx
+        lda pscore,x
+        jsr print_dec8
+        jsr print_inline
+        .text " POINTS, "
+        .byte 0
+        ldx tmpx
+        lda prights,x
+        jsr print_dec8
+        jsr print_inline
+        .text " RIGHT"
+        .byte 0
+        rts
+
+// print_gained: "3 POINTS" or "1 POINT"
+print_gained:
+        lda gained
+        jsr print_dec8
+        jsr print_inline
+        .text " POINT"
+        .byte 0
+        lda gained
+        cmp #1
+        beq pg_one
+        lda #$53                // "S"
+        jsr CHROUT
+pg_one:
+        rts
+
+// answer_right / answer_wrong: sound, count, points (gained) for the player
+answer_right:
+        ldx curplayer
+        inc prights,x
+        lda pscore,x
+        clc
+        adc gained
+        sta pscore,x
+        ldx #sfx_right-sfx_tbl
+        lda #$10                // triangle
+        jsr play_sfx
+        jsr get_recptr_ans
+        ldy #F_RIGHT+2
+        jsr count_up
+        jmp clear_text
+answer_wrong:
+        ldx curplayer
+        lda pscore,x
+        clc
+        adc gained              // the map game gives points for near misses too
+        sta pscore,x
+        ldx #sfx_wrong-sfx_tbl
+        lda #$20                // sawtooth
+        jsr play_sfx
+        jsr get_recptr_ans
+        ldy #F_WRONG+2
+        jsr count_up
+        jmp clear_text
+
+player_colour:
+        .byte 14, 8             // border: light blue for player 1, orange for player 2
+
+// --------------------------------------------------------------
+// game_menu: which game, and how many players
+// --------------------------------------------------------------
+game_menu:
+        lda #$93
+        jsr CHROUT
+        say(12, 3, "CHOOSE A GAME")
+        say(5, 7, "1  NAME THE MARKED CITY")
+        say(6, 8, "(PICK FROM THREE, H FOR HINTS)")
+        say(5, 11, "2  FIND THE CITY ON THE MAP")
+        say(6, 12, "(POINT AT IT: CLOSER SCORES MORE)")
+        say(5, 16, "P  PLAYERS: ")
+        lda players
+        clc
+        adc #$30
+        jsr CHROUT
+        lda players
+        cmp #2
+        bne gm_key
+        say(6, 17, "(TAKING TURNS, 10 CITIES EACH)")
+gm_key:
+        jsr poll_input
+        cmp #$31                // "1"
+        beq gm_one
+        cmp #$32                // "2"
+        beq gm_two
+        cmp #$50                // "P"
+        bne gm_key
+        lda players
+        eor #3                  // 1 <-> 2
+        sta players
+        jmp game_menu
+gm_one:
+        lda #0
+        sta mode
+        rts
+gm_two:
+        lda #1
+        sta mode
+        rts
 
 // --------------------------------------------------------------
 // err: not enough cities
@@ -465,16 +618,32 @@ go_main:
 err_few:
         lda #0
         sta loaded
-        ldx #0
-        ldy #24
-        jsr gotoxy
-        lda #<msg_few
-        sta ptr
-        lda #>msg_few
-        sta ptr+1
-        jsr print_str
+        say(0, 24, "NEED AT LEAST 10 CITIES. SPACE=RETRY")
         jsr wait_continue
         jmp main
+
+// print_inline: print the zero-terminated text that follows the JSR
+print_inline:
+        pla
+        sta ptr
+        pla
+        sta ptr+1
+pi_next:
+        inc ptr
+        bne pi_ch
+        inc ptr+1
+pi_ch:
+        ldy #0
+        lda (ptr),y
+        beq pi_end
+        jsr CHROUT
+        jmp pi_next
+pi_end:
+        lda ptr+1               // return to the byte after the 0
+        pha
+        lda ptr
+        pha
+        rts
 
 // --------------------------------------------------------------
 // input: the keyboard. poll_input: A = a key, or 0 if none
@@ -584,6 +753,7 @@ sh_clear:
         ldx #0
         ldy #24
         jsr gotoxy
+        jsr player_tag          // "P1 " in a two-player game
 .if (FLAG_HINT == 0) {
         lda hintlvl
         beq sh_text
@@ -655,11 +825,94 @@ load_file:
         rts
 
 // --------------------------------------------------------------
-// load CITIES and count records
+// load_cities: CITIES to $6C40 (before the maps load there), then
+// unpacked to CITYBUF: the build packs it (first byte 1, then the length
+// and LZ data); CITYEDIT saves it plain, which is copied. Then SCORES,
+// the right/wrong counts, are put into the records, and the records counted.
 // --------------------------------------------------------------
 load_cities:
         ldx #F_CITIES
         jsr load_named
+        lda #<CITYBUF
+        sta updst
+        lda #>CITYBUF
+        sta updst+1
+        lda CITYLOAD
+        cmp #1
+        bne lc_plain
+        lda #<(CITYLOAD+3)
+        sta upsrc
+        lda #>(CITYLOAD+3)
+        sta upsrc+1
+        clc
+        lda CITYLOAD+1          // unpacked length
+        adc #<CITYBUF
+        sta upendlo
+        lda CITYLOAD+2
+        adc #>CITYBUF
+        sta upendhi
+        jsr unpack_lz
+        jmp lc_scores
+lc_plain:                       // copy CITYLOAD.. up to the LOAD end address ($AE)
+        lda #<CITYLOAD
+        sta upsrc
+        lda #>CITYLOAD
+        sta upsrc+1
+        ldy #0
+lc_copy:
+        lda (upsrc),y
+        sta (updst),y
+        jsr um_src1
+        jsr um_dst1
+        lda upsrc+1
+        cmp $AF
+        bcc lc_copy
+        lda upsrc
+        cmp $AE
+        bcc lc_copy
+lc_scores:
+        ldx #F_SCORES           // no SCORES file: the counts in CITIES stay
+        jsr set_file
+        jsr load_file
+        bcs lc_count
+        jsr lc_count            // numrec
+        lda SCORESBUF           // only if it was saved for this many cities
+        cmp numrec
+        bne lc_done
+        lda #<(SCORESBUF+1)
+        sta ptr2
+        lda #>(SCORESBUF+1)
+        sta ptr2+1
+        lda #0
+        sta candidx
+lc_merge:
+        lda candidx
+        jsr get_recptr
+        ldx #0
+lc_digit:
+        ldy lc_offs,x           // the six digits: right, then wrong
+        txa
+        pha
+        ldx #0
+        lda (ptr2,x)
+        sta (reclo),y
+        inc ptr2
+        bne lc_d2
+        inc ptr2+1
+lc_d2:
+        pla
+        tax
+        inx
+        cpx #6
+        bne lc_digit
+        inc candidx
+        lda candidx
+        cmp numrec
+        bne lc_merge
+        rts
+lc_offs:
+        .byte F_RIGHT, F_RIGHT+1, F_RIGHT+2, F_WRONG, F_WRONG+1, F_WRONG+2
+lc_count:
         lda #<CITYBUF
         sta ptr
         lda #>CITYBUF
@@ -678,8 +931,7 @@ lc_loop:
         adc #0
         sta ptr+1
         cpx #RECMAX
-        beq lc_done
-        jmp lc_loop
+        bne lc_loop
 lc_done:
         stx numrec
         rts
@@ -736,38 +988,63 @@ save_file:
         jsr close_ch
         jmp read_error
 
-// save CITIES with the new right/wrong counts, on the plain text screen
-save_cities:
+// save_scores: write SCORES (the six digits of every city's counts) on the
+// plain text screen. Written byte by byte, so it needs no buffer; it is
+// small, so saving is quick. saveok = 1 if the drive reports no error.
+save_scores:
         jsr text_mode
         lda #$93
         jsr CHROUT
-        ldx #0
-        ldy #12
-        jsr gotoxy
-        lda #<msg_saving
-        sta ptr
-        lda #>msg_saving
-        sta ptr+1
-        jsr print_str
-        lda numrec
-        jsr get_recptr          // reclo = just past the last record
-        lda #0
-        tay
-        sta (reclo),y           // end marker
-        clc
-        lda reclo
-        adc #1
-        pha
-        lda rechi
-        adc #0
-        pha
-        ldx #F_SAVECITIES
+        say(15, 12, "SAVING...")
+        ldx #F_SAVESCORES
         jsr set_file
-        pla
-        tay
-        pla
-        tax
-        jsr save_file
+        lda fnlen
+        ldx fnlo
+        ldy fnhi
+        jsr SETNAM
+        lda #2
+        ldx #8
+        ldy #2
+        jsr SETLFS
+        jsr OPEN
+        bcs ss_fail
+        ldx #2
+        jsr CHKOUT
+        bcs ss_fail
+        lda #<SCORESBUF         // load address
+        jsr CHROUT
+        lda #>SCORESBUF
+        jsr CHROUT
+        lda numrec
+        jsr CHROUT
+        lda #0
+        sta candidx
+ss_rec:
+        lda candidx
+        jsr get_recptr
+        ldx #0
+ss_digit:
+        ldy lc_offs,x
+        lda (reclo),y
+        jsr CHROUT
+        inx
+        cpx #6
+        bne ss_digit
+        inc candidx
+        lda candidx
+        cmp numrec
+        bne ss_rec
+        lda #1
+        sta saveok
+        jmp ss_close
+ss_fail:
+        lda #0
+        sta saveok
+ss_close:
+        jsr CLRCHN
+        lda #2
+        jsr CLOSE
+        jsr read_error
         jmp map_mode
 
 // set_file: X = file number -> fnlen/fnlo/fnhi/addrlo/addrhi
@@ -955,8 +1232,12 @@ sr_got:
         rts
 
 // --------------------------------------------------------------
-// unpack: RLE data at upsrc to updst until updst reaches upendlo/hi.
-// $00 and $FF are followed by a run length; other bytes are literal.
+// unpack_lz: LZ data at upsrc to updst until updst reaches upendlo/hi.
+// A control byte $00-$7F is followed by that many + 1 literal bytes;
+// $80-$FD means "copy (control - $80 + 4) bytes from (offset) bytes back
+// in the output", with the offset in the next two bytes (low first);
+// $FE and $FF are a run of $00 or $FF, with the length (0 = 256) next.
+// The maps, the cities and the title are packed this way (prepare_data.ps1).
 // --------------------------------------------------------------
 unpack_map:
         lda regptr
@@ -977,46 +1258,74 @@ unpack_map:
         sta upendlo
         lda #>(BITMAP+6400)
         sta upendhi
-unpack:
-um_loop:
+unpack_lz:
         ldy #0
         lda (upsrc),y
-        beq um_run
-        cmp #$FF
-        beq um_run
-        sta (updst),y           // literal byte
+        jsr um_src1
+        tax
+        bmi lz_match
+        inx                     // literal: control + 1 bytes
+lz_lit:
+        lda (upsrc),y
+        sta (updst),y
         jsr um_src1
         jsr um_dst1
-        jmp um_end
-um_run:
-        tax                     // the byte
-        iny
-        lda (upsrc),y           // run length
-        sta count
-        jsr um_src1
-        jsr um_src1
+        dex
+        bne lz_lit
+        jmp lz_end
+lz_match:
+        cpx #$FE
+        bcs lz_run
         txa
-        ldy #0
-um_fill:
-        sta (updst),y
-        iny
-        cpy count
-        bne um_fill
-        tya
+        and #$7F
         clc
-        adc updst
-        sta updst
-        bcc um_end
-        inc updst+1
-um_end:
+        adc #4
+        tax                     // length 4-129
+        sec                     // ptr2 = updst - offset
+        lda updst
+        sbc (upsrc),y
+        sta ptr2
+        jsr um_src1
+        lda updst+1
+        sbc (upsrc),y
+        sta ptr2+1
+        jsr um_src1
+lz_copy:
+        lda (ptr2),y
+        sta (updst),y
+        inc ptr2
+        bne lz_c2
+        inc ptr2+1
+lz_c2:
+        jsr um_dst1
+        dex
+        bne lz_copy
+        jmp lz_end
+lz_run:                         // $FE: a run of $00, $FF: a run of $FF; then the length (0 = 256)
+        txa
+        and #1                  // $FE -> 0, $FF -> 1
+        beq lz_r0
+        lda #$FF
+lz_r0:
+        pha
+        lda (upsrc),y           // the length
+        jsr um_src1
+        tax
+        pla
+lz_fill:
+        sta (updst),y
+        jsr um_dst1
+        dex
+        bne lz_fill
+lz_end:
         lda updst+1
         cmp upendhi
-        bcc um_loop
-        bne um_done
+        bcc unpack_lz
+        bne lz_done
         lda updst
         cmp upendlo
-        bcc um_loop
-um_done:
+        bcc unpack_lz
+lz_done:
         rts
 um_src1:
         inc upsrc
@@ -1260,7 +1569,7 @@ it_wait:
         jmp $EA81               // KERNAL: restore registers, return
 
 // --------------------------------------------------------------
-// pick_ten: ROUNDS different cities. For each, three random candidates
+// pick_ten: nrounds different cities. For each, three random candidates
 // are drawn and the one answered wrong most often (wrong - right) wins,
 // so the cities you find hard come up more.
 // --------------------------------------------------------------
@@ -1311,7 +1620,7 @@ pt_next:
         sta tbl,y
         inc tmpx
         lda tmpx
-        cmp #ROUNDS
+        cmp nrounds
         bne pt_slot
         rts
 
@@ -1603,12 +1912,17 @@ show_marker:
         lda pxhi
         adc #0
         and #1
+        sta tmpd
+        lda $D010
+        and #%11111110
+        ora tmpd
         sta $D010
         clc
         lda pypix
         adc #50-5               // screen top is sprite y 50
         sta $D001
-        lda #1
+        lda $D015
+        ora #1
         sta $D015
         rts
 
@@ -1797,30 +2111,11 @@ print_question:
         ldx #0
         ldy #20
         jsr gotoxy
-        lda regptr              // region name, trailing spaces trimmed
+        lda regptr
         sta ptr
         lda regptr+1
         sta ptr+1
-        ldy #R_NAME+15
-pq_trim:
-        lda (ptr),y
-        cmp #$20
-        bne pq_end
-        dey
-        cpy #R_NAME
-        bcs pq_trim
-pq_end:
-        iny
-        sty count
-        ldy #R_NAME
-pq_name:
-        cpy count
-        bcs pq_named
-        lda (ptr),y
-        jsr CHROUT
-        iny
-        jmp pq_name
-pq_named:
+        jsr print_region
         lda #<msg_q
         sta ptr
         lda #>msg_q
@@ -1852,6 +2147,30 @@ pq_loop:
         lda tmpx
         cmp #3
         bne pq_loop
+        rts
+
+// print_region: the region name at ptr (a region table entry), trimmed
+print_region:
+        ldy #R_NAME+15
+pr_trim:
+        lda (ptr),y
+        cmp #$20
+        bne pr_end
+        dey
+        cpy #R_NAME
+        bcs pr_trim
+pr_end:
+        iny
+        sty count
+        ldy #R_NAME
+pr_name:
+        cpy count
+        bcs pr_done
+        lda (ptr),y
+        jsr CHROUT
+        iny
+        jmp pr_name
+pr_done:
         rts
 
 // --------------------------------------------------------------
@@ -2088,7 +2407,7 @@ load_title:
         sta upendlo
         lda #>(TITLESCR+$800)
         sta upendhi
-        jsr unpack_pb           // colours
+        jsr unpack_lz           // colours
         lda #<TITLEBMP
         sta updst
         lda #>TITLEBMP
@@ -2097,52 +2416,16 @@ load_title:
         sta upendlo
         lda #>(TITLEBMP+8000)
         sta upendhi
-        jsr unpack_pb           // bitmap (stores go to the RAM under the KERNAL)
+        sei                     // the bitmap is under the KERNAL ROM: the unpacker
+        lda #$35                // reads back what it wrote, so the ROM goes off
+        sta $01
+        jsr unpack_lz
+        lda #$36
+        sta $01
+        cli
         lda #1
         sta titleok
 lt_done:
-        rts
-
-// unpack_pb: PackBits data at upsrc to updst until updst reaches upendlo/hi.
-// A control byte $00-$7F is followed by that many + 1 literal bytes;
-// $80-$FF by one byte repeated (control - $80 + 3) times.
-unpack_pb:
-        ldy #0
-        lda (upsrc),y
-        jsr um_src1
-        tax
-        bmi pb_run
-        inx                     // literal: control + 1 bytes
-pb_lit:
-        lda (upsrc),y
-        sta (updst),y
-        jsr um_src1
-        jsr um_dst1
-        dex
-        bne pb_lit
-        jmp pb_end
-pb_run:
-        txa
-        and #$7F
-        clc
-        adc #3
-        tax
-        lda (upsrc),y
-        jsr um_src1
-pb_fill:
-        sta (updst),y
-        jsr um_dst1
-        dex
-        bne pb_fill
-pb_end:
-        lda updst+1
-        cmp upendhi
-        bcc unpack_pb
-        bne pb_done
-        lda updst
-        cmp upendlo
-        bcc unpack_pb
-pb_done:
         rts
 
 // title_on: show the picture
@@ -2214,15 +2497,15 @@ marker_shape:
 file_len:
         .byte fn_title_e-fn_title, fn_high_e-fn_high, fn_hs_e-fn_hs, fn_maps_e-fn_maps
         .byte fn_flags_e-fn_flags, fn_land_e-fn_land, fn_cities_e-fn_cities
-        .byte fn_cities_e-fn_savec, fn_hs_e-fn_savehs
+        .byte fn_scores_e-fn_scores, fn_hs_e-fn_savehs, fn_savesc_e-fn_savesc
 file_nlo:
-        .byte <fn_title, <fn_high, <fn_hs, <fn_maps, <fn_flags, <fn_land, <fn_cities, <fn_savec, <fn_savehs
+        .byte <fn_title, <fn_high, <fn_hs, <fn_maps, <fn_flags, <fn_land, <fn_cities, <fn_scores, <fn_savehs, <fn_savesc
 file_nhi:
-        .byte >fn_title, >fn_high, >fn_hs, >fn_maps, >fn_flags, >fn_land, >fn_cities, >fn_savec, >fn_savehs
+        .byte >fn_title, >fn_high, >fn_hs, >fn_maps, >fn_flags, >fn_land, >fn_cities, >fn_scores, >fn_savehs, >fn_savesc
 file_alo:
-        .byte <TITLEPACK, <HIGHCODE, <HISCORES, <MAPS, <FLAGS, <LANDMARKS, <CITYBUF, <CITYBUF, <HISCORES
+        .byte <TITLEPACK, <HIGHCODE, <HISCORES, <MAPS, <FLAGS, <LANDMARKS, <CITYLOAD, <SCORESBUF, <HISCORES, 0
 file_ahi:
-        .byte >TITLEPACK, >HIGHCODE, >HISCORES, >MAPS, >FLAGS, >LANDMARKS, >CITYBUF, >CITYBUF, >HISCORES
+        .byte >TITLEPACK, >HIGHCODE, >HISCORES, >MAPS, >FLAGS, >LANDMARKS, >CITYLOAD, >SCORESBUF, >HISCORES, 0
 fn_title:
         .text "TITLE"
 fn_title_e:
@@ -2243,62 +2526,24 @@ fn_flags_e:
 fn_land:
         .text "LANDMARKS"
 fn_land_e:
-fn_savec:
-        .text "@0:"
 fn_cities:
         .text "CITIES"
 fn_cities_e:
+fn_scores:
+        .text "SCORES"
+fn_scores_e:
+fn_savesc:
+        .text "@0:SCORES,P,W"
+fn_savesc_e:
 
 // --------------------------------------------------------------
 // strings
 // --------------------------------------------------------------
-msg_loading:
-        .text "LOADING..."
-        .byte 0
 msg_q:
         .text ": WHICH CITY IS MARKED?"
         .byte 0
-msg_correct:
-        .text "CORRECT! +"
-        .byte 0
-msg_points:
-        .text " POINTS. IT IS:"
-        .byte 0
-msg_wrong:
-        .text "NO, IT IS:"
-        .byte 0
-msg_next:
-        .text "PRESS SPACE"
-        .byte 0
-msg_over:
-        .text "GAME OVER"
-        .byte 0
-msg_score:
-        .text "YOU SCORED "
-        .byte 0
-msg_points2:
-        .text " POINTS, "
-        .byte 0
-msg_ofright:
-        .text " OF 10 RIGHT"
-        .byte 0
-msg_newhs:
-        .text "A NEW HIGH SCORE!"
-        .byte 0
-msg_again:
-        .text "PRESS SPACE"
-        .byte 0
 msg_ferr:
         .text "FILE ERROR - CHECK DISK. SPACE=RETRY"
-        .byte 0
-msg_few:
-        .text "NEED AT LEAST 10 CITIES. SPACE=RETRY"
-        .byte 0
-msg_saving:
-        .text "SAVING..."
-        .byte 0
-msg_nosave:
-        .text "COULD NOT SAVE TO DISK"
         .byte 0
 msg_time:
         .text "TIME "
@@ -2315,6 +2560,474 @@ msg_hint1:
         .byte 0
 msg_hint2:
         .byte 0
+
+// player_tag: "P1 " or "P2 " in a two-player game
+player_tag:
+        lda players
+        cmp #2
+        bne pt_none
+        lda #$50                // "P"
+        jsr CHROUT
+        lda curplayer
+        clc
+        adc #$31
+        jsr CHROUT
+        lda #$20
+        jmp CHROUT
+pt_none:
+        rts
+
+// player_tag2: "PLAYER 1" above the name entry in a two-player game
+player_tag2:
+        lda players
+        cmp #2
+        bne pt2_none
+        say(4, 6, "PLAYER ")
+        lda curplayer
+        clc
+        adc #$31
+        jmp CHROUT
+pt2_none:
+        rts
+
+// --------------------------------------------------------------
+// find_on_map: the other game. The city's name is shown; the player moves
+// a cross over the map with the cursor keys (or W A S D) and presses
+// Return or Space. Points by the distance in km: under 50: 5, 150: 4,
+// 300: 3, 600: 2, 1000: 1. Three or more count as a right answer.
+// --------------------------------------------------------------
+find_on_map:
+        lda regptr              // "<REGION>: FIND"
+        sta ptr
+        lda regptr+1
+        sta ptr+1
+        ldx #0
+        ldy #20
+        jsr gotoxy
+        jsr print_region
+        jsr print_inline
+        .text ": WHERE IS"
+        .byte 0
+        jsr get_recptr_ans
+        ldx #2
+        ldy #21
+        jsr gotoxy
+        jsr print_city
+        lda #$2C
+        jsr CHROUT
+        lda #$20
+        jsr CHROUT
+        jsr print_country
+        lda #$3F                // "?"
+        jsr CHROUT
+        say(0, 23, "MOVE: CURSOR KEYS OR W A S D")
+        ldx #0
+        ldy #24
+        jsr gotoxy
+        jsr player_tag
+        jsr print_inline
+        .text "RETURN OR SPACE: HERE"
+        .byte 0
+.if (FLAG_HINT == 1) {
+        jsr show_flag
+}
+        ldx #62                 // the cross
+fm_spr:
+        lda cross_shape,x
+        sta CROSSSPR,x
+        dex
+        bpl fm_spr
+        lda #CROSSSPR/64
+        sta SCREEN+$3FB
+        lda #1                  // white: it shows on land and on sea
+        sta $D02A
+        lda #160
+        sta crossxlo
+        lda #0
+        sta crossxhi
+        sta holdcnt
+        lda #80
+        sta crossy
+        jsr cross_pos
+        lda $D015
+        ora #%00001000
+        sta $D015
+        // move once a frame while a direction key is held
+fm_frame:
+        lda frames
+        cmp lastframe
+        beq fm_frame
+        sta lastframe
+        jsr fm_dir              // A = 0 none, 1 up, 2 down, 3 left, 4 right
+        bne fm_move
+        lda #0
+        sta holdcnt
+        jmp fm_key
+fm_move:
+        pha
+        inc holdcnt
+        bne fm_h
+        dec holdcnt
+fm_h:
+        ldx #1                  // speed: 1, 2, then 4 pixels a frame
+        lda holdcnt
+        cmp #12
+        bcc fm_step
+        ldx #2
+        cmp #30
+        bcc fm_step
+        ldx #4
+fm_step:
+        stx tmpd
+        pla
+        cmp #1
+        bne fm_n1
+        lda crossy              // up
+        sec
+        sbc tmpd
+        bcs fm_y
+        lda #0
+        jmp fm_y
+fm_n1:
+        cmp #2
+        bne fm_n2
+        lda crossy              // down
+        clc
+        adc tmpd
+        cmp #MAPROWS*8
+        bcc fm_y
+        lda #MAPROWS*8-1
+fm_y:
+        sta crossy
+        jmp fm_moved
+fm_n2:
+        cmp #3
+        bne fm_right
+        sec                     // left
+        lda crossxlo
+        sbc tmpd
+        sta crossxlo
+        lda crossxhi
+        sbc #0
+        sta crossxhi
+        bcs fm_moved
+        lda #0
+        sta crossxlo
+        sta crossxhi
+        jmp fm_moved
+fm_right:
+        clc
+        lda crossxlo
+        adc tmpd
+        sta crossxlo
+        lda crossxhi
+        adc #0
+        sta crossxhi
+        beq fm_moved
+        lda crossxlo            // keep it below 320
+        cmp #<320
+        bcc fm_moved
+        lda #<319
+        sta crossxlo
+fm_moved:
+        jsr cross_pos
+fm_key:
+        jsr GETIN
+        cmp #$0D
+        beq fm_done
+        cmp #$20
+        beq fm_done
+        jmp fm_frame
+fm_done:
+        jsr map_distance        // distlo/hi = km
+        jsr show_marker         // where the city really is
+        jsr cross_pos           // (show_marker rewrote $D010)
+        // points by distance
+        ldx #0
+fm_pts:
+        lda distlo
+        cmp km_lo,x
+        lda disthi
+        sbc km_hi,x
+        bcc fm_got
+        inx
+        cpx #5
+        bne fm_pts
+fm_got:
+        lda #5
+        sec
+        stx tmpd
+        sbc tmpd
+        sta gained
+        cmp #3
+        bcs fm_right_ans
+        jsr answer_wrong
+        jmp fm_text
+fm_right_ans:
+        jsr answer_right
+fm_text:
+        ldx #0
+        ldy #20
+        jsr gotoxy
+        lda distlo
+        sta n16lo
+        lda disthi
+        sta n16hi
+        jsr print_dec16
+        jsr print_inline
+        .text " KM AWAY. +"
+        .byte 0
+        jmp print_gained
+km_lo:
+        .byte <50, <150, <300, <600, <1000
+km_hi:
+        .byte >50, >150, >300, >600, >1000
+
+// fm_dir: the direction key held now (the KERNAL's key matrix code in $CB,
+// shift in $028D): A = 0 none, 1 up, 2 down, 3 left, 4 right
+fm_dir:
+        lda $CB
+        cmp #9                  // W
+        beq fd_up
+        cmp #13                 // S
+        beq fd_down
+        cmp #10                 // A
+        beq fd_left
+        cmp #18                 // D
+        beq fd_right
+        cmp #7                  // cursor up/down
+        bne fd_lr
+        lda $028D
+        and #1
+        bne fd_up
+fd_down:
+        lda #2
+        rts
+fd_lr:
+        cmp #2                  // cursor left/right
+        bne fd_none
+        lda $028D
+        and #1
+        bne fd_left
+fd_right:
+        lda #4
+        rts
+fd_up:
+        lda #1
+        rts
+fd_left:
+        lda #3
+        rts
+fd_none:
+        lda #0
+        rts
+
+// cross_pos: the cross sprite (3) at crossx/crossy; its centre is 5 pixels in
+cross_pos:
+        clc
+        lda crossxlo
+        adc #24-5
+        sta $D006
+        lda crossxhi
+        adc #0
+        beq cp_lo
+        lda $D010
+        ora #%00001000
+        bne cp_msb
+cp_lo:
+        lda $D010
+        and #%11110111
+cp_msb:
+        sta $D010
+        clc
+        lda crossy
+        adc #50-5
+        sta $D007
+        rts
+
+// map_distance: km between the cross and the city, on this region's map.
+//   a = |dx| * DX * cos(latitude)   b = |dy| * DY   (hundredths of a degree)
+//   d = max(a, b) + 3/8 * min(a, b)  (a close fit for the straight distance)
+//   km = d * 1.11                    (one degree is 111 km)
+map_distance:
+        sec                     // |dx| in pixels
+        lda crossxlo
+        sbc pxlo
+        sta m16lo
+        lda crossxhi
+        sbc pxhi
+        sta m16hi
+        bcs md_dxpos
+        sec
+        lda #0
+        sbc m16lo
+        sta m16lo
+        lda #0
+        sbc m16hi
+        sta m16hi
+md_dxpos:
+        lda regdx
+        sta mb
+        jsr mul16x8             // r24 = |dx| * DX
+        lda r24
+        sta m16lo
+        lda r24+1
+        sta m16hi
+        lda lathi               // |latitude| in degrees -> cos
+        bpl md_latpos
+        sec
+        lda #0
+        sbc latlo
+        sta dvd
+        lda #0
+        sbc lathi
+        sta dvdh
+        jmp md_deg
+md_latpos:
+        lda latlo
+        sta dvd
+        lda lathi
+        sta dvdh
+md_deg:
+        lda #100
+        sta dvs
+        lda #0
+        sta dvsh
+        jsr div16
+        ldx dvd
+        lda cos_tbl,x
+        sta mb
+        jsr mul16x8             // r24 = a * cos * 256
+        lda r24+1
+        sta alo
+        lda r24+2
+        sta ahi
+        lda crossy              // |dy| * DY
+        sec
+        sbc pypix
+        bcs md_dypos
+        eor #$FF
+        adc #1
+md_dypos:
+        sta ma
+        lda regdy
+        sta mb
+        jsr mul8
+        lda res
+        sta blo
+        lda resh
+        sta bhi
+        // d = max + 3/8 min
+        lda alo
+        cmp blo
+        lda ahi
+        sbc bhi
+        bcs md_amax             // a >= b
+        lda alo                 // swap, so a is the larger
+        ldx blo
+        sta blo
+        stx alo
+        lda ahi
+        ldx bhi
+        sta bhi
+        stx ahi
+md_amax:
+        lsr bhi                 // b/4
+        ror blo
+        lsr bhi
+        ror blo
+        lda blo
+        sta tlo
+        lda bhi
+        sta thi
+        lsr thi                 // b/8
+        ror tlo
+        clc
+        lda alo
+        adc blo
+        sta alo
+        lda ahi
+        adc bhi
+        sta ahi
+        clc
+        lda alo
+        adc tlo
+        sta alo
+        sta distlo
+        lda ahi
+        adc thi
+        sta ahi
+        sta disthi
+        // km = d + d/10 + d/100
+        ldx #10
+        jsr md_addpart
+        ldx #100
+md_addpart:
+        lda alo
+        sta dvd
+        lda ahi
+        sta dvdh
+        stx dvs
+        lda #0
+        sta dvsh
+        jsr div16
+        clc
+        lda distlo
+        adc dvd
+        sta distlo
+        lda disthi
+        adc dvdh
+        sta disthi
+        rts
+
+// mul16x8: m16lo/hi * mb -> r24 (3 bytes)
+mul16x8:
+        lda #0
+        sta r24
+        sta r24+1
+        sta r24+2
+        ldx #8
+m16_loop:
+        asl r24
+        rol r24+1
+        rol r24+2
+        asl mb
+        bcc m16_next
+        clc
+        lda r24
+        adc m16lo
+        sta r24
+        lda r24+1
+        adc m16hi
+        sta r24+1
+        lda r24+2
+        adc #0
+        sta r24+2
+m16_next:
+        dex
+        bne m16_loop
+        rts
+
+// cos of 0-90 degrees, times 255
+cos_tbl:
+.for (var i = 0; i <= 90; i++) {
+        .byte round(255 * cos(toRadians(i)))
+}
+
+// the map game's cross: 11 x 11 with an open centre
+cross_shape:
+        .byte $04,$00,$00
+        .byte $04,$00,$00
+        .byte $04,$00,$00
+        .byte $04,$00,$00
+        .byte $00,$00,$00
+        .byte $F1,$E0,$00
+        .byte $00,$00,$00
+        .byte $04,$00,$00
+        .byte $04,$00,$00
+        .byte $04,$00,$00
+        .byte $04,$00,$00
+        .fill 30, 0
 
 .assert "The main program must end below the bitmap at $2000", * <= BITMAP, true
 
@@ -2503,6 +3216,7 @@ enter_hiscore:
         jsr text_mode
         lda #$93
         jsr CHROUT
+        jsr player_tag2         // "PLAYER 1" in a two-player game
         ldx #4
         ldy #8
         jsr gotoxy
@@ -2792,6 +3506,8 @@ ss_totals:
 // $FF starts the tune again. Notes count semitones from C2 = 1.
 // --------------------------------------------------------------
 music_on:
+        lda musicon             // already playing: carry on
+        bne mo_done
         sei
         lda #0
         sta mus1pos
@@ -2822,6 +3538,8 @@ music_on:
         lda #>music_irq
         sta $0315
         cli
+        rts
+mo_done:
         rts
 
 music_off:

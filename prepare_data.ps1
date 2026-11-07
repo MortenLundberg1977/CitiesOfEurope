@@ -1,8 +1,8 @@
 $ErrorActionPreference = "Stop"
 
-# Builds the CITIES and WORLDMAP data files for the disk.
-# Each file is a PRG: a 2-byte load address followed by the data.
-# tools/prepare_data.py does the same on Linux.
+# Builds the data files of the game: CITIES, SCORES, MAPS, LANDMARKS, HISCORES,
+# FLAGS (Cities of Europe) and TITLE. Each file is a PRG: a 2-byte load address
+# followed by the data. tools/prepare_data.py does the same on Linux.
 
 $projectRoot = $PSScriptRoot
 $buildDirectory = Join-Path $projectRoot "build"
@@ -36,6 +36,89 @@ function Format-Coordinate {
     return $text.PadLeft($Width)
 }
 
+# The LZ packing the game unpacks (unpack_lz in src/game.asm): a control byte
+# 0-127 is followed by that many + 1 literal bytes; 128-253 means "copy
+# (control - 128 + 4) bytes from (offset) bytes back in the output", with the
+# offset in the next two bytes, low first; 254 and 255 are a run of $00 or $FF,
+# with the length (1-256, 0 = 256) next. Written in C# for speed.
+Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+public static class Lz {
+    public static byte[] Pack(byte[] d) {
+        int n = d.Length;
+        var outp = new List<byte>();
+        var lit = new List<byte>();
+        var head = new Dictionary<int, int>();
+        var prev = new int[n];
+        Action flush = () => {
+            int k = 0;
+            while (k < lit.Count) {
+                int c = Math.Min(128, lit.Count - k);
+                outp.Add((byte)(c - 1));
+                for (int j = 0; j < c; j++) outp.Add(lit[k + j]);
+                k += c;
+            }
+            lit.Clear();
+        };
+        Action<int> insert = pos => {
+            if (pos + 4 > n) return;
+            int h = d[pos] | (d[pos + 1] << 8) | (d[pos + 2] << 16) | (d[pos + 3] << 24);
+            int old;
+            prev[pos] = head.TryGetValue(h, out old) ? old : -1;
+            head[h] = pos;
+        };
+        int i = 0;
+        while (i < n) {
+            int run = 0;
+            if (d[i] == 0 || d[i] == 255) { while (i + run < n && run < 256 && d[i + run] == d[i]) run++; }
+            int bestLen = 0, bestOff = 0;
+            if (i + 4 <= n) {
+                int h = d[i] | (d[i + 1] << 8) | (d[i + 2] << 16) | (d[i + 3] << 24);
+                int cand, tries = 0;
+                if (head.TryGetValue(h, out cand)) {
+                    while (cand >= 0 && tries < 128 && i - cand <= 65535) {
+                        int max = Math.Min(129, n - i), l = 0;
+                        while (l < max && d[cand + l] == d[i + l]) l++;
+                        if (l > bestLen) { bestLen = l; bestOff = i - cand; if (l == max) break; }
+                        cand = prev[cand]; tries++;
+                    }
+                }
+            }
+            if (run >= 2 && run + 1 >= bestLen) {
+                flush();
+                outp.Add((byte)(d[i] == 0 ? 0xFE : 0xFF));
+                outp.Add((byte)(run & 255));
+                for (int k = 0; k < run; k++) insert(i + k);
+                i += run;
+            } else if (bestLen >= 4) {
+                flush();
+                outp.Add((byte)(0x80 | (bestLen - 4)));
+                outp.Add((byte)(bestOff & 255));
+                outp.Add((byte)(bestOff >> 8));
+                for (int k = 0; k < bestLen; k++) insert(i + k);
+                i += bestLen;
+            } else {
+                lit.Add(d[i]); insert(i); i++;
+            }
+        }
+        flush();
+        return outp.ToArray();
+    }
+    public static byte[] Unpack(byte[] p, int start, int outLen) {
+        var o = new List<byte>();
+        int s = start;
+        while (o.Count < outLen) {
+            int c = p[s++];
+            if (c < 128) { for (int j = 0; j <= c; j++) o.Add(p[s++]); }
+            else if (c >= 254) { int len = p[s++]; if (len == 0) len = 256; for (int j = 0; j < len; j++) o.Add((byte)(c == 254 ? 0 : 255)); }
+            else { int len = (c & 127) + 4, off = p[s] | (p[s + 1] << 8); s += 2; for (int j = 0; j < len; j++) o.Add(o[o.Count - off]); }
+        }
+        return o.ToArray();
+    }
+}
+"@
+
 # REGIONS: data\regions.csv. Each region's map is assets\maps\region<ID>.png,
 # drawn by tools\render_map.ps1 with the same corner (LON0, LAT0) and scale
 # (DX, DY: hundredths of a degree per pixel) that the game uses for the marker.
@@ -45,23 +128,45 @@ for ($i = 0; $i -lt $regions.Count; $i++) {
     if ($regions[$i].NAME.Length -gt 16) { throw "Region name '$($regions[$i].NAME)' is longer than 16 characters." }
 }
 
-# CITIES: 59-byte records, then a 0 byte. Loads to $3900 (the game) or $6000 (CITYEDIT).
+# CITIES: 59-byte records, then a 0 byte:
 #   CITY(16),COUNTRY(16),LAT(6),LON(7),REGION(1),RIGHT(3),WRONG(3) + CR
-# RIGHT and WRONG count the player's answers; the game saves them to the disk.
-# build.bat copies CITIES off the old disk to build\oldcities.prg first, so the
-# counts carry over to the new disk (matched by city and country).
+# packed: the byte 1, the length (2 bytes), LZ data. Loads to $6C40; the game
+# unpacks it to $3900. (CITYEDIT saves it plain; the game reads that too.)
+# SCORES: the RIGHT and WRONG digits of every city, which the game saves after
+# each game: the number of cities, then 6 digits a city. Loads to $2000.
+# build.bat copies CITIES and SCORES off the old disk (build\oldcities.prg,
+# build\oldscores.prg), so the counts carry over, matched by city and country.
 $oldCounts = @{}
 $oldPath = Join-Path $buildDirectory "oldcities.prg"
+$oldScoresPath = Join-Path $buildDirectory "oldscores.prg"
 if (Test-Path $oldPath) {
     $old = [System.IO.File]::ReadAllBytes($oldPath)
-    for ($o = 2; $o + 59 -le $old.Length -and $old[$o] -ne 0; $o += 59) {
-        if ($old[$o + 58] -ne 13) { break }          # an older record layout: no counts
-        $key = [System.Text.Encoding]::ASCII.GetString($old, $o, 33)
-        $oldCounts[$key] = [System.Text.Encoding]::ASCII.GetString($old, $o + 51, 7)
+    if ($old.Length -gt 5 -and $old[2] -eq 1) {         # packed
+        $plainOld = [Lz]::Unpack($old, 5, $old[3] + 256 * $old[4])
+    } else {
+        $plainOld = [byte[]]$old[2..($old.Length - 1)]
+    }
+    $oldKeys = New-Object System.Collections.Generic.List[string]
+    for ($o = 0; $o + 59 -le $plainOld.Length -and $plainOld[$o] -ne 0; $o += 59) {
+        if ($plainOld[$o + 58] -ne 13) { break }     # an older record layout: no counts
+        $key = [System.Text.Encoding]::ASCII.GetString($plainOld, $o, 33)
+        $oldKeys.Add($key)
+        $oldCounts[$key] = [System.Text.Encoding]::ASCII.GetString($plainOld, $o + 51, 7)
+    }
+    if (Test-Path $oldScoresPath) {
+        $sc = [System.IO.File]::ReadAllBytes($oldScoresPath)
+        if ($sc.Length -ge 3 + 6 * $oldKeys.Count -and $sc[2] -eq $oldKeys.Count) {
+            for ($k = 0; $k -lt $oldKeys.Count; $k++) {
+                $d = [System.Text.Encoding]::ASCII.GetString($sc, 3 + 6 * $k, 6)
+                $oldCounts[$oldKeys[$k]] = $d.Substring(0, 3) + "," + $d.Substring(3, 3)
+            }
+        }
     }
     Remove-Item $oldPath
 }
+if (Test-Path $oldScoresPath) { Remove-Item $oldScoresPath }
 $records = New-Object System.Text.StringBuilder
+$scoreDigits = New-Object System.Text.StringBuilder
 $lines = Get-Content (Join-Path $projectRoot "data\cities.csv") | Select-Object -Skip 1
 $count = 0
 $kept = 0
@@ -91,6 +196,7 @@ foreach ($line in $lines) {
     $record = $key + "," + (Format-Coordinate $lat 6) + "," + (Format-Coordinate $lon 7) + "," +
         $regionId + "," + $stats + "`r"
     [void]$records.Append($record)
+    [void]$scoreDigits.Append($stats.Substring(0, 3) + $stats.Substring(4, 3))
     $count++
 }
 if ($count -gt 220) { throw "data\cities.csv has $count cities; the game holds at most 220." }
@@ -99,59 +205,24 @@ foreach ($region in $regions) {
     if ($n -lt 3) { throw "Region $($region.NAME) needs at least 3 cities, has $n." }
 }
 $cityBytes = [System.Text.Encoding]::ASCII.GetBytes($records.ToString()) + [byte]0
-Write-Prg "cities.prg" 0x3900 $cityBytes
+$cityPacked = [Lz]::Pack($cityBytes)
+$cityFile = New-Object System.Collections.Generic.List[byte]
+$cityFile.Add(1); $cityFile.Add([byte]($cityBytes.Length -band 255)); $cityFile.Add([byte]($cityBytes.Length -shr 8))
+$cityFile.AddRange($cityPacked)
+Write-Prg "cities.prg" 0x6C40 $cityFile.ToArray()
+$scoreFile = New-Object System.Collections.Generic.List[byte]
+$scoreFile.Add([byte]$count)
+$scoreFile.AddRange([System.Text.Encoding]::ASCII.GetBytes($scoreDigits.ToString()))
+Write-Prg "scores.prg" 0x2000 $scoreFile.ToArray()
+Write-Output "Cities: $count, $($cityFile.Count) bytes packed (from $($cityBytes.Length))."
 if ($kept) { Write-Output "Kept the answer counts of $kept cities from the old disk." }
 
 # MAPS: every region map as a hi-res bitmap (40x20 cells of 8 bytes, bit 7 = leftmost
-# pixel, set = land), packed with a simple RLE: $00 and $FF are followed by a run
-# length (1-255), other bytes are literal. Loads to $6C40:
+# pixel, set = land), each packed (LZ) on its own. Loads to $6C40:
 #   count (1), then per region: LON0, LAT0 (signed words, hundredths of a degree),
 #   DX, DY (bytes), address of its packed map (word), name (16 chars)
 #   then the packed maps
 Add-Type -AssemblyName System.Drawing
-
-# The RLE packing the game unpacks: $00 and $FF are followed by a run length
-# (1-255), other bytes are literal.
-function Add-RLE($list, [byte[]]$data) {
-    $i = 0
-    while ($i -lt $data.Length) {
-        $b = $data[$i]
-        if ($b -eq 0 -or $b -eq 255) {
-            $run = 1
-            while ($i + $run -lt $data.Length -and $run -lt 255 -and $data[$i + $run] -eq $b) { $run++ }
-            $list.Add($b); $list.Add([byte]$run)
-            $i += $run
-        } else {
-            $list.Add($b)
-            $i++
-        }
-    }
-}
-
-# PackBits, for the title picture: a control byte 0-127 is followed by that many
-# + 1 literal bytes; 128-255 by one byte repeated (control - 128 + 3) times.
-function Add-PackBits($list, [byte[]]$data) {
-    $i = 0; $n = $data.Length
-    while ($i -lt $n) {
-        $run = 1
-        while ($i + $run -lt $n -and $run -lt 130 -and $data[$i + $run] -eq $data[$i]) { $run++ }
-        if ($run -ge 3) {
-            $list.Add([byte](128 + $run - 3)); $list.Add($data[$i]); $i += $run
-        } else {
-            $j = $i
-            while ($j -lt $n -and ($j - $i) -lt 128) {
-                $r = 1
-                while ($j + $r -lt $n -and $r -lt 3 -and $data[$j + $r] -eq $data[$j]) { $r++ }
-                if ($r -ge 3) { break }
-                $j++
-            }
-            $list.Add([byte]($j - $i - 1))
-            for ($k = $i; $k -lt $j; $k++) { $list.Add($data[$k]) }
-            $i = $j
-        }
-    }
-}
-
 $mapsBase = 0x6C40
 $header = New-Object System.Collections.Generic.List[byte]
 $packed = New-Object System.Collections.Generic.List[byte]
@@ -174,7 +245,7 @@ foreach ($region in $regions) {
     }
     $image.Dispose()
     $address = $dataStart + $packed.Count
-    Add-RLE $packed $bitmap
+    $packed.AddRange([Lz]::Pack($bitmap))
     foreach ($word in @(([Math]::Round([double]::Parse($region.LON0, $culture) * 100)), ([Math]::Round([double]::Parse($region.LAT0, $culture) * 100)))) {
         $header.Add([byte]($word -band 0xff)); $header.Add([byte](($word -shr 8) -band 0xff))
     }
@@ -377,7 +448,7 @@ if ((Test-Path $titlePath) -and -not $titleFresh) {
     Write-Prg "titlebmp.prg" 0xE000 $tbitmap
 }
 
-# TITLE: both parts packed (PackBits) into one file, which loads faster. It loads to $6C40
+# TITLE: both parts packed (LZ, each on its own) into one file, which loads faster. It loads to $6C40
 # (before the maps load there) and the game unpacks it: 2048 bytes to $C000
 # (the colours, padded), then 8000 bytes to $E000 (the bitmap).
 if (Test-Path $titlePath) {
@@ -388,8 +459,8 @@ if (Test-Path $titlePath) {
     [System.Array]::Copy($bmpPart, 2, $plain, 2048, 8000)
     $titlePacked = New-Object System.Collections.Generic.List[byte]
     # the two parts separately: the game switches destination between them
-    Add-PackBits $titlePacked $plain[0..2047]
-    Add-PackBits $titlePacked $plain[2048..10047]
+    $titlePacked.AddRange([Lz]::Pack([byte[]]$plain[0..2047]))
+    $titlePacked.AddRange([Lz]::Pack([byte[]]$plain[2048..10047]))
     if (0x6C40 + $titlePacked.Count -gt 0xAB00) { throw "The packed title is too big." }
     Write-Prg "title.prg" 0x6C40 $titlePacked.ToArray()
     Write-Output "Title: $($titlePacked.Count) bytes packed (from 10048)."

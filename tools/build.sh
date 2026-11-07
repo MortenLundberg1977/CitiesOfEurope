@@ -21,11 +21,13 @@ mkdir -p build
 ka() { java -jar "$KICKASS_JAR" "$@" >build/kickass.log 2>&1 || { grep -v JAVA_TOOL build/kickass.log; exit 1; }; }
 ka "src/$GAME.asm" -odir ../build -symbolfile
 ka src/cityedit.asm -odir ../build
-# Keep the right/wrong answer counts and the high scores saved on the old disk.
-rm -f build/oldcities.prg build/oldhiscores.prg
+# Keep the right/wrong answer counts (SCORES, matched up with CITIES) and the
+# high scores saved on the old disk.
+rm -f build/oldcities.prg build/oldhiscores.prg build/oldscores.prg
 if [ -f "build/$GAME.d64" ]; then
   c1541 "build/$GAME.d64" -read cities build/oldcities.prg >/dev/null 2>&1 || true
   c1541 "build/$GAME.d64" -read hiscores build/oldhiscores.prg >/dev/null 2>&1 || true
+  c1541 "build/$GAME.d64" -read scores build/oldscores.prg >/dev/null 2>&1 || true
 fi
 python3 "$TOOLS/prepare_data.py"
 
@@ -39,6 +41,7 @@ c1541 -format "$DISKNAME,64" d64 "build/$GAME.d64" \
   -write build/maps.prg maps \
   -write build/landmarks.prg landmarks \
   -write build/cities.prg cities \
+  -write build/scores.prg scores \
   -write build/cityedit.prg cityedit >/dev/null
 if [ -f build/flags.prg ]; then
   c1541 "build/$GAME.d64" -write build/flags.prg flags >/dev/null

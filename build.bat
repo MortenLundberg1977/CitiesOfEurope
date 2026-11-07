@@ -54,12 +54,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM The game saves each city's right/wrong answer counts in CITIES and the top-10
-REM table in HISCORES on the disk. Copy them off the old disk so prepare_data.ps1
-REM can carry them over.
+REM The game saves the right/wrong answer counts in SCORES and the top-10 table
+REM in HISCORES on the disk. Copy them (and CITIES, to match the counts to the
+REM cities) off the old disk so prepare_data.ps1 can carry them over.
 if exist "build\oldcities.prg" del "build\oldcities.prg"
 if exist "build\oldhiscores.prg" del "build\oldhiscores.prg"
-if exist "build\%GAME%.d64" "%C1541_EXE%" "build\%GAME%.d64" -read cities "build\oldcities.prg" -read hiscores "build\oldhiscores.prg" >nul 2>nul
+if exist "build\oldscores.prg" del "build\oldscores.prg"
+if exist "build\%GAME%.d64" "%C1541_EXE%" "build\%GAME%.d64" -read cities "build\oldcities.prg" -read hiscores "build\oldhiscores.prg" -read scores "build\oldscores.prg" >nul 2>nul
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "prepare_data.ps1"
 if errorlevel 1 exit /b 1
@@ -72,7 +73,7 @@ if exist "build\%GAME%.d64" (
     echo build\%GAME%.d64 is in use. Close VICE and build again.
     exit /b 1
 )
-"%C1541_EXE%" -format "%DISKNAME%,64" d64 "build\%GAME%.d64" -write "build\%GAME%.prg" %GAME% -write "build\highcode.prg" highcode -write "build\title.prg" title -write "build\hiscores.prg" hiscores -write "build\maps.prg" maps -write "build\landmarks.prg" landmarks -write "build\cities.prg" cities -write "build\cityedit.prg" cityedit
+"%C1541_EXE%" -format "%DISKNAME%,64" d64 "build\%GAME%.d64" -write "build\%GAME%.prg" %GAME% -write "build\highcode.prg" highcode -write "build\title.prg" title -write "build\hiscores.prg" hiscores -write "build\maps.prg" maps -write "build\landmarks.prg" landmarks -write "build\cities.prg" cities -write "build\scores.prg" scores -write "build\cityedit.prg" cityedit
 if errorlevel 1 exit /b 1
 if exist "build\flags.prg" (
     "%C1541_EXE%" "build\%GAME%.d64" -write "build\flags.prg" flags

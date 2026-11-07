@@ -23,30 +23,49 @@ Taken in the VICE emulator.
 
 ## Gameplay
 
-The title picture comes up first while the rest of the disk loads (about two
-minutes on a real 1541; use warp in VICE to skip the wait). Then the title
-music plays (Ode to Joy) and the title and the high-score table take turns.
-Press **Space** to play, or **S** to see your stats.
+The title picture comes up first, and the title music (Ode to Joy) plays
+while the rest of the disk loads (about two minutes on a real 1541; use warp
+in VICE to skip the wait). Then the title and the high-score table take
+turns. Press **Space** to play, or **S** to see your stats.
 
-Ten cities are marked one by one with a flashing ring on a hi-res map of
-their part of Europe (British Isles, Iberia, France & Benelux, Central Europe,
-Italy & Balkans, Nordic & Baltic, Eastern Europe), with country borders
-(dotted) and the main rivers. Pick the right city from three choices with keys
-**1-3**; the two wrong choices come from the same part of Europe.
+Then choose a game with **1** or **2**, and press **P** first for two
+players. The maps show one part of Europe at a time (British Isles, Iberia,
+France & Benelux, Central Europe, Italy & Balkans, Nordic & Baltic, Eastern
+Europe), with country borders (dotted) and the main rivers.
+
+**1: Name the marked city.** Ten cities are marked one by one with a flashing
+ring. Pick the right city from three choices with keys **1-3**; the two wrong
+choices come from the same part of Europe.
 
 - **H** gives a hint: first the flag of the city's country, then a 50/50 that
   removes a wrong choice.
 - **Points** for a right answer: 3 without a hint, 2 with the flag, 1 after
   the 50/50; plus 2 if you answer within 5 seconds, 1 within 10. The seconds
-  count at the bottom of the screen. At most 50 points a game.
+  count at the bottom of the screen.
+
+**2: Find the city on the map.** The city and its country are named (and its
+flag shown); move the white cross to where you think it is with the **cursor
+keys** or **W A S D** (hold a key to move faster) and press **Return** or
+**Space**. The game shows where the city really is and how far off you were,
+in km. **Points** by distance: under 50 km 5, under 150 km 4, under 300 km 3,
+under 600 km 2, under 1000 km 1. Three or more points count as a right answer.
+
+**Two players** take turns, 10 cities each. The border shows whose turn it is
+(light blue: player 1, orange: player 2); at the end the game shows both
+scores and the winner, and each player who made the top 10 types a name.
+
+Both games:
+
 - A right answer plays a rising chime, a wrong one a low buzz. For some cities
   a picture of a landmark appears on the map (the Eiffel Tower, Big Ben, the
   Colosseum, ...; `data/landmarks.txt`).
 - **Practice**: the game counts right and wrong answers for every city and
-  saves them to the disk after each game. Cities you often get wrong come up
-  more often. **S** on the title screen lists the cities you miss most.
+  saves them to the disk after each game (in the `SCORES` file). Cities you
+  often get wrong come up more often. **S** on the title screen lists the
+  cities you miss most.
 - **High scores**: a new top-10 score asks for your name (up to 10 letters,
-  Return to finish) and the table is saved to the disk.
+  Return to finish) and the table is saved to the disk. Both games share the
+  table; each gives at most 50 points.
 
 Counts and high scores are kept when you rebuild the disk.
 
@@ -100,14 +119,17 @@ build can't replace a disk that VICE has open.
 The script assembles both programs, makes the data files with
 `prepare_data.ps1`, and writes a fresh `build\citiesofeurope.d64` with
 `CITIESOFEUROPE`, `HIGHCODE`, `TITLE`, `HISCORES`, `MAPS`, `LANDMARKS`,
-`CITIES`, `FLAGS` and `CITYEDIT`. The cities come from `data/cities.csv`, with
-the answer counts and the high scores copied from the old disk (counts matched
-by city and country). Other changes saved with CITYEDIT are lost on the next
-build: to keep a city, add it to `data/cities.csv`.
+`CITIES`, `SCORES`, `FLAGS` and `CITYEDIT`. The cities come from
+`data/cities.csv`, with the answer counts (`SCORES`) and the high scores
+copied from the old disk (counts matched by city and country). Other changes
+saved with CITYEDIT are lost on the next build: to keep a city, add it to
+`data/cities.csv`.
 
 There is no fast loader: those upload their own code to the disk drive, which
-SD2IEC card readers don't run. Instead the files are packed, and the title
-picture loads first.
+SD2IEC card readers don't run. Instead the files are packed (an LZ packer in
+the build, an unpacker in the game), the title picture loads first and the
+music plays while the rest loads. The game writes only the small `SCORES`
+file after a game (5 blocks), so saving takes a few seconds.
 
 On Linux or macOS use `tools/build.sh` (needs Python 3 with Pillow). The
 GitHub Actions workflow runs it on every push: open the latest **Build** run
@@ -119,6 +141,25 @@ On a C64 or in VICE without autostart:
 LOAD"CITIESOFEUROPE",8,1
 RUN
 ```
+
+## Testing on a real C64
+
+The game is tested in VICE. On a real C64 (for example from an SD card),
+please check these and note anything odd:
+
+1. **Loading**: the title picture appears within a few seconds and the music
+   starts; how long until the high-score table first shows (loading done)?
+2. **The map screen**: the line between the map and the text below it is
+   clean (no flickering or garbage line), and the ring marker flashes.
+3. **The map game**: the cross moves smoothly with the cursor keys (with Shift
+   for left and up) and with W A S D, faster when a key is held.
+4. **Sound**: the chime and the buzz after an answer, and the title music.
+5. **Saving**: after a game it says "SAVING..." and no "COULD NOT SAVE TO
+   DISK". Then switch off, load again, and press **S**: the stats should still
+   show the answers from before. A new high score should still be in the table.
+
+The timer and the screen split assume a PAL C64 (Europe); on an NTSC C64 the
+seconds run fast and the split may flicker.
 
 ## The region maps
 
@@ -192,15 +233,18 @@ Edits the CITIES file on the disk. Keys: cursor up/down to select, **A** add,
 While editing, type over the field, Delete to go back, Return for the next
 field (city, country, latitude, longitude, region). Coordinates are degrees
 with two decimals and a sign, e.g. `+55.68` and `-171.77`. CITYEDIT doesn't
-check that a city fits its region's map; the build does.
+check that a city fits its region's map; the build does. It saves CITIES
+unpacked, which the game also reads; the answer counts stay in `SCORES`.
 
 ## Project files
 
-- `src/game.asm` — the game: loading, region maps (unpacked into a bitmap with
-  a raster split to text for the bottom five rows), marker, flag and landmark
-  sprites, questions, hints, points, timer, answer counts, sounds; and in a
-  second part (`HIGHCODE`, at `$C800`) the title loop, high scores, stats and
-  the music player. It is the same file in World Cities and Cities of Europe.
+- `src/game.asm` — the game: loading and unpacking, the game menu, both games
+  (naming the marked city; finding it on the map, with the distance in km),
+  one or two players, region maps (a bitmap with a raster split to text for
+  the bottom five rows), marker, cross, flag and landmark sprites, hints,
+  points, timer, answer counts, sounds; and in a second part (`HIGHCODE`, at
+  `$C800`) the title loop, high scores, stats and the music player. It is the
+  same file in World Cities and Cities of Europe.
 - `src/config.asm` — what differs between the two: the hint (flag or country
   name), the text title and the title tune
 - `src/citiesofeurope.asm` — imports the two
@@ -214,10 +258,10 @@ check that a city fits its region's map; the build does.
 - `assets/title.png` (optional) — the title picture, any size; the build
   scales it to fit the screen and converts it to a multicolour bitmap. Without
   it the game shows a text title.
-- `prepare_data.ps1` — makes `CITIES` (59-byte records loading to `$3900`),
-  `MAPS` (region table and packed maps loading to `$6C40`), `LANDMARKS`,
-  `HISCORES`, `FLAGS` and `TITLE`; the layouts are described at the top of
-  each part
+- `prepare_data.ps1` — makes `CITIES` (59-byte records, packed, loading to
+  `$6C40` and unpacked to `$3900`), `SCORES`, `MAPS` (region table and packed
+  maps loading to `$6C40`), `LANDMARKS`, `HISCORES`, `FLAGS` and `TITLE`; the
+  layouts and the LZ packing are described at the top of each part
 - `build.bat` — KickAssembler build, D64 packaging, and optional VICE launch
 - `tools/build.sh`, `tools/prepare_data.py` — the same build for Linux/macOS
 - `tools/render_map.ps1` — draws `assets/maps/` from Natural Earth data
